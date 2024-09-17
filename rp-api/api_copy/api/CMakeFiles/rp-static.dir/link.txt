@@ -1,0 +1,2 @@
+/usr/bin/ar qc output/librp.a CMakeFiles/rp-obj.dir/src/common.c.o CMakeFiles/rp-obj.dir/src/kiss_fft/kiss_fft.c.o CMakeFiles/rp-obj.dir/src/kiss_fft/kiss_fftr.c.o CMakeFiles/rp-obj.dir/src/oscilloscope.c.o CMakeFiles/rp-obj.dir/src/acq_handler.c.o CMakeFiles/rp-obj.dir/src/generate.c.o CMakeFiles/rp-obj.dir/src/gen_handler.c.o CMakeFiles/rp-obj.dir/src/spec_dsp.c.o CMakeFiles/rp-obj.dir/src/rp.c.o CMakeFiles/rp-obj.dir/src/calib.c.o
+/usr/bin/ranlib output/librp.a

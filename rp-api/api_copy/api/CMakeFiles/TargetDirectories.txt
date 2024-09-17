@@ -1,0 +1,9 @@
+/root/RedPitaya/rp-api/api/CMakeFiles/install/local.dir
+/root/RedPitaya/rp-api/api/CMakeFiles/install.dir
+/root/RedPitaya/rp-api/api/CMakeFiles/rebuild_cache.dir
+/root/RedPitaya/rp-api/api/CMakeFiles/rp-obj.dir
+/root/RedPitaya/rp-api/api/CMakeFiles/list_install_components.dir
+/root/RedPitaya/rp-api/api/CMakeFiles/rp-shared.dir
+/root/RedPitaya/rp-api/api/CMakeFiles/rp-static.dir
+/root/RedPitaya/rp-api/api/CMakeFiles/install/strip.dir
+/root/RedPitaya/rp-api/api/CMakeFiles/edit_cache.dir

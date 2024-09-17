@@ -1,1 +1,10 @@
-/opt/redpitaya/version.txt
+##############################################################################
+# Red Pitaya GNU/Linux Ecosystem
+# Version: 1.04
+# Build: 11
+# Branch: 
+# Commit: 402276d524408b93e1b479f8338b6c5732100a65
+# U-Boot: "redpitaya-v2016.4"
+# Linux Kernel: "branch-redpitaya-v2017.2"
+# Pro Applications: ""
+##############################################################################

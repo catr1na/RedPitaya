@@ -1,0 +1,4 @@
+/root/RedPitaya/build/lib/librp-hw.so
+/root/RedPitaya/build/include/rp_hw.h
+/root/RedPitaya/build/lib/librp-hw.a
+/root/RedPitaya/build/include/rp_hw.h

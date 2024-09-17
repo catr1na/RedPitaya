@@ -1,0 +1,2 @@
+/usr/bin/ar qc output/librp-hw.a CMakeFiles/rp-hw-obj.dir/src/i2c-helper.c.o CMakeFiles/rp-hw-obj.dir/src/i2c.c.o CMakeFiles/rp-hw-obj.dir/src/led_system.c.o CMakeFiles/rp-hw-obj.dir/src/rp_hw.c.o CMakeFiles/rp-hw-obj.dir/src/spi-helper.c.o CMakeFiles/rp-hw-obj.dir/src/spi.c.o CMakeFiles/rp-hw-obj.dir/src/uart.c.o
+/usr/bin/ranlib output/librp-hw.a

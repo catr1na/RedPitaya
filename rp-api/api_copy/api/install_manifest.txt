@@ -1,0 +1,6 @@
+/root/RedPitaya/build/lib/librp.so
+/root/RedPitaya/build/include/version.h
+/root/RedPitaya/build/include/rp.h
+/root/RedPitaya/build/lib/librp.a
+/root/RedPitaya/build/include/version.h
+/root/RedPitaya/build/include/rp.h
