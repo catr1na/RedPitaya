@@ -10,10 +10,10 @@
 #include "spec_dsp.h"
 #include "bubble_detector.h"
 
-#define SAMPLE_RATE 125000000  // RedPitaya's sampling rate
+#define SAMPLE_RATE 125000000  // Red Pitaya's sampling rate
 #define DECIMATION RP_DEC_64   // Decimation factor
 #define SAMPLES_20MS (SAMPLE_RATE / 64 * 0.02)  // Samples for 20ms at given decimation
-#define OVERLAP_SAMPLES (SAMPLES_20MS / 2)  // 10ms overlap
+#define OVERLAP_SAMPLES (SAMPLES_20MS / 2)      // 10ms overlap
 #define BUFFER_COUNT 32        // Circular buffer size
 #define FFT_SIZE SAMPLES_20MS  // Size of FFT
 
@@ -50,7 +50,7 @@ void init_circular_buffer() {
     cbuf.running = true;
     pthread_mutex_init(&cbuf.mutex, NULL);
     pthread_cond_init(&cbuf.data_ready, NULL);
-    
+
     for (int i = 0; i < BUFFER_COUNT; i++) {
         cbuf.buffers[i].data = (float*)malloc(SAMPLES_20MS * sizeof(float));
         if (!cbuf.buffers[i].data) {
@@ -63,18 +63,18 @@ void init_circular_buffer() {
 }
 
 void cleanup_system() {
-    // Clean up buffers
     for (int i = 0; i < BUFFER_COUNT; i++) {
         free(cbuf.buffers[i].data);
     }
     pthread_mutex_destroy(&cbuf.mutex);
     pthread_cond_destroy(&cbuf.data_ready);
 
-    // Clean up DSP resources
     spec_cleanup();
-    detector_cleanup();
 
-    // Release RedPitaya
+#ifdef CNN_ENABLED
+    detector_cleanup();
+#endif
+
     rp_Release();
 }
 
@@ -87,52 +87,48 @@ void* acquisition_thread(void* arg) {
     }
 
     while (cbuf.running) {
-        // Wait for the required amount of data
+        // Acquire the latest data
         rp_AcqGetLatestDataV(RP_CH_1, &buff_size, temp_buffer);
-        
+
         pthread_mutex_lock(&cbuf.mutex);
-        
-        // Check if buffer is available
+
+        // Wait if the next buffer hasn't been processed yet
         if (!cbuf.buffers[cbuf.write_index].processed) {
             pthread_mutex_unlock(&cbuf.mutex);
-            usleep(1000);  // Wait 1ms and try again
+            usleep(1000);
             continue;
         }
-        
-        // Copy data to circular buffer
-        memcpy(cbuf.buffers[cbuf.write_index].data, 
-               temp_buffer, 
-               SAMPLES_20MS * sizeof(float));
-               
+
+        // Copy data into the circular buffer
+        memcpy(cbuf.buffers[cbuf.write_index].data, temp_buffer, SAMPLES_20MS * sizeof(float));
         cbuf.buffers[cbuf.write_index].ready = true;
         cbuf.buffers[cbuf.write_index].processed = false;
-        
         cbuf.write_index = (cbuf.write_index + 1) % BUFFER_COUNT;
-        
+
         pthread_cond_signal(&cbuf.data_ready);
         pthread_mutex_unlock(&cbuf.mutex);
-        
-        // Wait for overlap period
-        usleep(10000);  // 10ms delay
+
+        // Sleep 10 ms (simulating 50% overlap)
+        usleep(10000);
     }
-    
+
     free(temp_buffer);
     return NULL;
 }
 
 void process_buffer(int index) {
-    float* time_data = cbuf.buffers[index].data;  // 20ms of raw data
+    float* time_data = cbuf.buffers[index].data;
     float* spectrum = malloc((FFT_SIZE/2 + 1) * sizeof(float));
     float* power_db = malloc((FFT_SIZE/2 + 1) * sizeof(float));
-    
+
     if (!spectrum || !power_db) {
-        fprintf(stderr, "Failed to allocate buffers\n");
+        fprintf(stderr, "Failed to allocate buffers for spectrum\n");
         free(spectrum);
         free(power_db);
         return;
     }
 
-    // Compute FFT
+    // Compute FFT magnitude
     if (spec_process_frame(time_data, spectrum, FFT_SIZE) != 0) {
         fprintf(stderr, "Failed to process frame %d\n", frame_counter);
         free(spectrum);
@@ -140,52 +136,53 @@ void process_buffer(int index) {
         return;
     }
 
-    // Convert to power in dB
-    // P(dB) = 20 * log10(|FFT|) for voltage measurements
+    // Convert magnitude to dB
     for(int i = 0; i < FFT_SIZE/2 + 1; i++) {
         if(spectrum[i] > 0) {
             power_db[i] = 20 * log10(spectrum[i]);
         } else {
-            power_db[i] = -200;  // Set very low dB for zero/negative values
+            power_db[i] = -200;
         }
     }
 
+    // -------- SAVE TO FILE MODE -----------
     if (cbuf.save_to_file) {
         char filename[256];
-        snprintf(filename, sizeof(filename), "%s/spectrogram_%06u.bin", 
-                output_directory, frame_counter);
+        snprintf(filename, sizeof(filename), "%s/spectrogram_%06u.bin",
+                 output_directory, frame_counter);
+
         FILE* fp = fopen(filename, "wb");
         if (fp) {
-            // Save metadata
+            // metadata: [0] = SAMPLES_20MS, [1] = FFT_SIZE/2+1, [2] = (SAMPLE_RATE/DECIMATION), [3] = time offset in ms
             uint32_t metadata[4] = {
-                SAMPLES_20MS,         // Number of time samples
-                FFT_SIZE/2 + 1,       // Number of frequency bins
-                SAMPLE_RATE/64,       // Sample rate after decimation
-                frame_counter * 10    // Time offset in milliseconds
+                SAMPLES_20MS,
+                FFT_SIZE/2 + 1,
+                (uint32_t)(SAMPLE_RATE / 64),
+                frame_counter * 10
             };
             fwrite(metadata, sizeof(uint32_t), 4, fp);
-            
-            // Save time domain data (20ms worth)
             fwrite(time_data, sizeof(float), SAMPLES_20MS, fp);
-            
-            // Save frequency domain magnitude
             fwrite(spectrum, sizeof(float), FFT_SIZE/2 + 1, fp);
-
-            // Save power in dB
             fwrite(power_db, sizeof(float), FFT_SIZE/2 + 1, fp);
-            
             fclose(fp);
-            printf("Saved frame %u (time offset: %u ms)\n", 
+
+            printf("Saved frame %u (time offset: %u ms)\n",
                    frame_counter, frame_counter * 10);
+        } else {
+            fprintf(stderr, "Could not open file %s for writing\n", filename);
         }
-    } else {
-        // Add frame to detector and process
-        detector_add_frame(power_db, FFT_SIZE/2 + 1);
-        DetectionResult result = detector_process();
+    }
+
+#ifdef CNN_ENABLED
+    // -------- CNN MODE -----------
+    else {
+        // Run bubble detection (if compiled with CNN)
+        DetectionResult result = detector_process_frame(power_db, FFT_SIZE/2 + 1);
         if (result == DETECTION_BUBBLE) {
             printf("Bubble detected at frame %u\n", frame_counter);
         }
     }
+#endif
 
     free(spectrum);
     free(power_db);
@@ -195,45 +192,72 @@ void process_buffer(int index) {
 void* processing_thread(void* arg) {
     while (cbuf.running) {
         pthread_mutex_lock(&cbuf.mutex);
-        
+
+        // Wait if the read buffer has already been processed or no data yet
         while (cbuf.buffers[cbuf.read_index].processed && cbuf.running) {
             pthread_cond_wait(&cbuf.data_ready, &cbuf.mutex);
         }
-        
+
         if (!cbuf.running) {
             pthread_mutex_unlock(&cbuf.mutex);
             break;
         }
-        
+
         if (cbuf.buffers[cbuf.read_index].ready) {
             process_buffer(cbuf.read_index);
             cbuf.buffers[cbuf.read_index].processed = true;
             cbuf.read_index = (cbuf.read_index + 1) % BUFFER_COUNT;
         }
-        
+
         pthread_mutex_unlock(&cbuf.mutex);
     }
-    
+
     return NULL;
 }
 
 int main(int argc, char **argv) {
     if (argc != 3) {
         printf("Usage: %s <mode> <path>\n", argv[0]);
-        printf("mode: 0 for processing (CNN detection), 1 for saving files\n");
-        printf("path: model path for mode 0, output directory for mode 1\n");
+        printf("  mode: 0 for processing (CNN detection), 1 for saving files\n");
+        printf("  path: model path for mode=0, output directory for mode=1\n");
         return 1;
     }
-    
-    // Parse command line arguments
-    cbuf.save_to_file = atoi(argv[1]) != 0;
+
+    int mode = atoi(argv[1]);
     output_directory = argv[2];
-    
-    // Set up signal handlers
+
+#ifdef CNN_ENABLED
+    // If compiled with CNN
+    if (mode == 0) {
+        // CNN-based detection
+        if (!detector_init(output_directory)) {
+            fprintf(stderr, "Failed to initialize detector\n");
+            return 1;
+        }
+        cbuf.save_to_file = false;
+    } else if (mode == 1) {
+        // Save-to-file mode
+        cbuf.save_to_file = true;
+    } else {
+        fprintf(stderr, "Invalid mode: %d\n", mode);
+        return 1;
+    }
+#else
+    // If compiled WITHOUT CNN
+    // We only support saving mode in this compilation
+    if (mode != 1) {
+        fprintf(stderr, "CNN is disabled, so only mode=1 (save) is valid.\n");
+        return 1;
+    }
+    printf("Running in save mode. CNN will be disabled.\n");
+    cbuf.save_to_file = true;
+#endif
+
+    // Handle Ctrl+C / kill signals
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-    
-    // Initialize RedPitaya
+
+    // Initialize Red Pitaya
     if (rp_Init() != RP_OK) {
         fprintf(stderr, "Failed to initialize RedPitaya\n");
         return 1;
@@ -245,53 +269,30 @@ int main(int argc, char **argv) {
     rp_AcqSetTriggerLevel(RP_CH_1, 0.5);
     rp_AcqSetTriggerDelay(0);
 
-    // Initialize DSP
+    // Initialize DSP for FFT
     if (spec_init(FFT_SIZE, HANNING) != 0) {
         fprintf(stderr, "Failed to initialize DSP\n");
         rp_Release();
         return 1;
     }
 
-    // Initialize circular buffer
+    // Initialize and start data acquisition
     init_circular_buffer();
-
-    if (!cbuf.save_to_file) {
-        // Processing mode: initialize detector
-        if (!detector_init(output_directory)) {
-            fprintf(stderr, "Failed to initialize detector\n");
-            cleanup_system();
-            return 1;
-        }
-    }
-
-    // Start acquisition
     rp_AcqStart();
     rp_AcqSetTriggerSrc(RP_TRIG_SRC_NOW);
-    
-    // Create processing threads
+
+    // Create threads: acquisition + processing
     pthread_t acq_thread, proc_thread;
-    if (pthread_create(&acq_thread, NULL, acquisition_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create acquisition thread\n");
-        cleanup_system();
-        return 1;
-    }
-    if (pthread_create(&proc_thread, NULL, processing_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create processing thread\n");
-        cbuf.running = false;
-        pthread_join(acq_thread, NULL);
-        cleanup_system();
-        return 1;
-    }
-    
-    printf("Running. Press Ctrl+C to stop...\n");
-    
-    // Wait for threads to complete
+    pthread_create(&acq_thread, NULL, acquisition_thread, NULL);
+    pthread_create(&proc_thread, NULL, processing_thread, NULL);
+
+    // Wait for threads to finish
     pthread_join(acq_thread, NULL);
     pthread_join(proc_thread, NULL);
-    
+
     // Cleanup
     cleanup_system();
-    
     printf("\nAcquisition complete. Processed %u frames.\n", frame_counter);
+
     return 0;
 }
