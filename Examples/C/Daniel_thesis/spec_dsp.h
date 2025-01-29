@@ -2,6 +2,7 @@
 #define SPEC_DSP_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef enum {
     RECTANGULAR = 0,
@@ -21,5 +22,11 @@ void spec_cleanup(void);
 
 // Get output size (FFT_SIZE/2 + 1)
 int spec_get_output_size(void);
+
+// Get current window type
+window_mode_t spec_get_window_type(void);
+
+// Change window type
+int spec_change_window(window_mode_t new_type);
 
 #endif // SPEC_DSP_H
