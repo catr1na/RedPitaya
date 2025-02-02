@@ -12,16 +12,22 @@
 #define CONV_KERNEL_SIZE 3
 #define POOL_SIZE 2
 
+// Input dimensions
+#define INPUT_HEIGHT 513  // Number of frequency bins (nperseg=1024)
+#define INPUT_WIDTH 38    // Number of subwindows per chunk (num_subwindows=38)
+
+// Detection Results
 typedef enum {
     DETECTION_BACKGROUND = 0,
     DETECTION_BUBBLE = 1
 } DetectionResult;
 
-// Initialize detector with pre-trained weights
+// Initialize detector with pre-trained weights directory
 bool detector_init(const char* weights_dir);
 
-// Process single spectrogram frame
-DetectionResult detector_process_frame(float* spectrogram, int size);
+// Process a single spectrogram frame
+// 'spectrogram' should be an array of floats with shape [INPUT_HEIGHT * INPUT_WIDTH]
+DetectionResult detector_process_frame(float* spectrogram);
 
 // Clean up detector resources
 void detector_cleanup(void);
