@@ -1,4 +1,4 @@
-#ifdef CNN_ENABLED  // Only compile CNN code if this flag is set
+#ifdef CNN_ENABLED  // Compile this file only if CNN_ENABLED is defined
 
 #include "bubble_detector.h"
 #include <stdio.h>
@@ -6,472 +6,390 @@
 #include <string.h>
 #include <math.h>
 
-#define INPUT_HEIGHT 257  // FFT_SIZE/2 + 1
-#define INPUT_WIDTH 1     // Single time frame
-#define POOL1_HEIGHT (INPUT_HEIGHT/POOL_SIZE)
-#define POOL1_WIDTH (INPUT_WIDTH/POOL_SIZE)
-#define POOL2_HEIGHT (POOL1_HEIGHT/POOL_SIZE)
-#define POOL2_WIDTH (POOL1_WIDTH/POOL_SIZE)
-#define POOL3_HEIGHT (POOL2_HEIGHT/POOL_SIZE)
-#define POOL3_WIDTH (POOL2_WIDTH/POOL_SIZE)
-#define CONV1_SIZE ((INPUT_HEIGHT - CONV_KERNEL_SIZE + 1) * (INPUT_WIDTH - CONV_KERNEL_SIZE + 1) * CONV1_FILTERS)
-#define POOL1_SIZE (CONV1_SIZE / (POOL_SIZE * POOL_SIZE))
-#define CONV2_SIZE ((POOL1_SIZE - CONV_KERNEL_SIZE + 1) * (1 - CONV_KERNEL_SIZE + 1) * CONV2_FILTERS)
-#define POOL2_SIZE (CONV2_SIZE / (POOL_SIZE * POOL_SIZE))
-#define CONV3_SIZE ((POOL2_HEIGHT - CONV_KERNEL_SIZE + 1) * (POOL2_WIDTH - CONV_KERNEL_SIZE + 1) * CONV3_FILTERS)
-#define POOL3_SIZE ((POOL3_HEIGHT) * (POOL3_WIDTH))
-#ifndef CNN_MODE
-#define CNN_MODE 1  // Set to 0 to disable CNN during compilation
-#endif
+//---------------------------------------------------------------------
+// Structure to hold CNN weights and biases
+//---------------------------------------------------------------------
+typedef struct {
+    // Convolutional Layer 1
+    float* conv1_weights; // [CONV1_FILTERS, CONV_KERNEL_SIZE, CONV_KERNEL_SIZE, 1]
+    float* conv1_bias;    // [CONV1_FILTERS]
 
-static struct {
-    float* conv1_weights;
-    float* conv1_bias;
-    float* conv2_weights;
-    float* conv2_bias;
-    float* conv3_weights;
-    float* conv3_bias;
-    float* dense1_weights;
-    float* dense1_bias;
-    float* dense2_weights;
-    float* dense2_bias;
-    bool initialized;
-} model = {0};
+    // Convolutional Layer 2
+    float* conv2_weights; // [CONV2_FILTERS, CONV_KERNEL_SIZE, CONV_KERNEL_SIZE, CONV1_FILTERS]
+    float* conv2_bias;    // [CONV2_FILTERS]
 
+    // Convolutional Layer 3
+    float* conv3_weights; // [CONV3_FILTERS, CONV_KERNEL_SIZE, CONV_KERNEL_SIZE, CONV2_FILTERS]
+    float* conv3_bias;    // [CONV3_FILTERS]
+
+    // Dense Layer 1
+    float* dense1_weights; // [DENSE1_UNITS, <flattened_size>]
+    float* dense1_bias;    // [DENSE1_UNITS]
+
+    // Dense Layer 2 (Output Layer)
+    float* dense2_weights; // [2, DENSE1_UNITS]
+    float* dense2_bias;    // [2]
+} CNNModel;
+
+static CNNModel model = {0};
+static int is_initialized = 0;
+
+//---------------------------------------------------------------------
+// Activation functions
+//---------------------------------------------------------------------
 static float relu(float x) {
     return x > 0 ? x : 0;
 }
 
-static void softmax(float* input, int size) {
-    float max_val = input[0];
-    for(int i = 1; i < size; i++) {
-        if(input[i] > max_val) max_val = input[i];
+static void softmax(float* input, int length) {
+    float max = input[0];
+    for (int i = 1; i < length; i++) {
+        if (input[i] > max) max = input[i];
     }
-    
     float sum = 0.0f;
-    for(int i = 0; i < size; i++) {
-        float val = expf(input[i] - max_val);
-        input[i] = val;
-        sum += val;
+    for (int i = 0; i < length; i++) {
+        input[i] = expf(input[i] - max);
+        sum += input[i];
     }
-    
-    for(int i = 0; i < size; i++) {
+    for (int i = 0; i < length; i++) {
         input[i] /= sum;
     }
 }
 
-static void conv2d(const float* input, int in_h, int in_w, int in_c,
-                  const float* weights, const float* bias,
-                  int kernel_size, int num_filters,
-                  float* output) {
+//---------------------------------------------------------------------
+// Helper: Load binary weights from a file
+//---------------------------------------------------------------------
+static float* load_weights(const char* filepath, size_t count) {
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) {
+        fprintf(stderr, "Failed to open weight file: %s\n", filepath);
+        return NULL;
+    }
+    float* weights = (float*)malloc(sizeof(float) * count);
+    if (!weights) {
+        fprintf(stderr, "Failed to allocate memory for weights from: %s\n", filepath);
+        fclose(fp);
+        return NULL;
+    }
+    size_t read = fread(weights, sizeof(float), count, fp);
+    if (read != count) {
+        fprintf(stderr, "Failed to read weights from: %s (expected %zu, got %zu)\n", filepath, count, read);
+        free(weights);
+        fclose(fp);
+        return NULL;
+    }
+    fclose(fp);
+    return weights;
+}
+
+//---------------------------------------------------------------------
+// Helper: Build a full file path from the directory and filename
+//---------------------------------------------------------------------
+static char* build_filepath(const char* weights_dir, const char* filename) {
+    size_t len = strlen(weights_dir) + 1 + strlen(filename) + 1; // weights_dir + "/" + filename + '\0'
+    char* full_path = (char*)malloc(len);
+    if (!full_path) {
+        fprintf(stderr, "Failed to allocate memory for file path.\n");
+        return NULL;
+    }
+    snprintf(full_path, len, "%s/%s", weights_dir, filename);
+    return full_path;
+}
+
+//---------------------------------------------------------------------
+// Detector initialization: load all weights from files.
+// If mode==0 (CNN detection) this function is called with the weights directory.
+// In mode==1 (save file mode) this function is never called.
+//---------------------------------------------------------------------
+bool detector_init(const char* weights_dir) {
+    if (is_initialized) {
+        fprintf(stderr, "Detector is already initialized.\n");
+        return false;
+    }
+
+    // Load Conv1 weights and bias
+    char* filepath = build_filepath(weights_dir, "conv1_weights.bin");
+    if (!filepath) return false;
+    model.conv1_weights = load_weights(filepath, CONV1_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * 1);
+    free(filepath);
+    if (!model.conv1_weights) return false;
+
+    filepath = build_filepath(weights_dir, "conv1_bias.bin");
+    if (!filepath) return false;
+    model.conv1_bias = load_weights(filepath, CONV1_FILTERS);
+    free(filepath);
+    if (!model.conv1_bias) return false;
+
+    // Load Conv2 weights and bias
+    filepath = build_filepath(weights_dir, "conv2_weights.bin");
+    if (!filepath) return false;
+    model.conv2_weights = load_weights(filepath, CONV2_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * CONV1_FILTERS);
+    free(filepath);
+    if (!model.conv2_weights) return false;
+
+    filepath = build_filepath(weights_dir, "conv2_bias.bin");
+    if (!filepath) return false;
+    model.conv2_bias = load_weights(filepath, CONV2_FILTERS);
+    free(filepath);
+    if (!model.conv2_bias) return false;
+
+    // Load Conv3 weights and bias
+    filepath = build_filepath(weights_dir, "conv3_weights.bin");
+    if (!filepath) return false;
+    model.conv3_weights = load_weights(filepath, CONV3_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * CONV2_FILTERS);
+    free(filepath);
+    if (!model.conv3_weights) return false;
+
+    filepath = build_filepath(weights_dir, "conv3_bias.bin");
+    if (!filepath) return false;
+    model.conv3_bias = load_weights(filepath, CONV3_FILTERS);
+    free(filepath);
+    if (!model.conv3_bias) return false;
+
+    // Calculate the flattened size after 3 poolings.
+    // Each pooling layer reduces dimensions by a factor of POOL_SIZE.
+    int pooled_height = INPUT_HEIGHT;
+    int pooled_width  = INPUT_WIDTH;
+    for (int i = 0; i < 3; i++) {
+        pooled_height /= POOL_SIZE;
+        pooled_width  /= POOL_SIZE;
+    }
+    int flattened_size = CONV3_FILTERS * pooled_height * pooled_width;
+
+    // Load Dense1 weights and bias
+    filepath = build_filepath(weights_dir, "dense1_weights.bin");
+    if (!filepath) return false;
+    model.dense1_weights = load_weights(filepath, DENSE1_UNITS * flattened_size);
+    free(filepath);
+    if (!model.dense1_weights) return false;
+
+    filepath = build_filepath(weights_dir, "dense1_bias.bin");
+    if (!filepath) return false;
+    model.dense1_bias = load_weights(filepath, DENSE1_UNITS);
+    free(filepath);
+    if (!model.dense1_bias) return false;
+
+    // Load Dense2 weights and bias
+    filepath = build_filepath(weights_dir, "dense2_weights.bin");
+    if (!filepath) return false;
+    model.dense2_weights = load_weights(filepath, 2 * DENSE1_UNITS);
+    free(filepath);
+    if (!model.dense2_weights) return false;
+
+    filepath = build_filepath(weights_dir, "dense2_bias.bin");
+    if (!filepath) return false;
+    model.dense2_bias = load_weights(filepath, 2);
+    free(filepath);
+    if (!model.dense2_bias) return false;
+
+    is_initialized = 1;
+    return true;
+}
+
+//---------------------------------------------------------------------
+// CNN forward-pass helper functions
+//---------------------------------------------------------------------
+static float* conv2d_forward(const float* input, int in_h, int in_w, int in_c,
+                              const float* weights, const float* bias,
+                              int kernel_size, int num_filters) {
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
-    
-    for(int h = 0; h < out_h; h++) {
-        for(int w = 0; w < out_w; w++) {
-            for(int f = 0; f < num_filters; f++) {
+    float* output = (float*)calloc(out_h * out_w * num_filters, sizeof(float));
+    if (!output) {
+        fprintf(stderr, "Failed to allocate memory for conv2d output.\n");
+        return NULL;
+    }
+    for (int f = 0; f < num_filters; f++) {
+        for (int i = 0; i < out_h; i++) {
+            for (int j = 0; j < out_w; j++) {
                 float sum = 0.0f;
-                for(int kh = 0; kh < kernel_size; kh++) {
-                    for(int kw = 0; kw < kernel_size; kw++) {
-                        for(int c = 0; c < in_c; c++) {
-                            int in_idx = ((h+kh) * in_w + (w+kw)) * in_c + c;
-                            int w_idx = (f * kernel_size * kernel_size * in_c) + 
-                                      (kh * kernel_size * in_c) + 
-                                      (kw * in_c) + c;
+                for (int ki = 0; ki < kernel_size; ki++) {
+                    for (int kj = 0; kj < kernel_size; kj++) {
+                        for (int c = 0; c < in_c; c++) {
+                            int in_idx = (i + ki) * in_w * in_c + (j + kj) * in_c + c;
+                            int w_idx = f * kernel_size * kernel_size * in_c + ki * kernel_size * in_c + kj * in_c + c;
                             sum += input[in_idx] * weights[w_idx];
                         }
                     }
                 }
-                int out_idx = (h * out_w + w) * num_filters + f;
-                output[out_idx] = relu(sum + bias[f]);
+                sum += bias[f];
+                if (sum < 0) sum = 0; // ReLU activation
+                int out_idx = i * out_w * num_filters + j * num_filters + f;
+                output[out_idx] = sum;
             }
         }
     }
+    return output;
 }
 
-static void max_pool_2d(const float* input, int in_h, int in_w, int channels,
-                       float* output) {
-    int out_h = in_h / POOL_SIZE;
-    int out_w = in_w / POOL_SIZE;
-    
-    for(int h = 0; h < out_h; h++) {
-        for(int w = 0; w < out_w; w++) {
-            for(int c = 0; c < channels; c++) {
+static float* max_pool2d_forward(const float* input, int in_h, int in_w, int in_c,
+                                 int pool_size) {
+    int out_h = in_h / pool_size;
+    int out_w = in_w / pool_size;
+    float* output = (float*)calloc(out_h * out_w * in_c, sizeof(float));
+    if (!output) {
+        fprintf(stderr, "Failed to allocate memory for max_pool2d output.\n");
+        return NULL;
+    }
+    for (int c = 0; c < in_c; c++) {
+        for (int i = 0; i < out_h; i++) {
+            for (int j = 0; j < out_w; j++) {
                 float max_val = -INFINITY;
-                for(int ph = 0; ph < POOL_SIZE; ph++) {
-                    for(int pw = 0; pw < POOL_SIZE; pw++) {
-                        int in_idx = ((h*POOL_SIZE + ph) * in_w * channels) +
-                                   ((w*POOL_SIZE + pw) * channels) + c;
-                        if(input[in_idx] > max_val) {
+                for (int pi = 0; pi < pool_size; pi++) {
+                    for (int pj = 0; pj < pool_size; pj++) {
+                        int in_i = i * pool_size + pi;
+                        int in_j = j * pool_size + pj;
+                        int in_idx = in_i * in_w * in_c + in_j * in_c + c;
+                        if (input[in_idx] > max_val)
                             max_val = input[in_idx];
-                        }
                     }
                 }
-                output[(h * out_w * channels) + (w * channels) + c] = max_val;
+                int out_idx = i * out_w * in_c + j * in_c + c;
+                output[out_idx] = max_val;
             }
         }
     }
+    return output;
 }
 
-static void dense_layer(const float* input, int input_size,
-                       const float* weights, const float* bias,
-                       int output_size, float* output) {
-    for(int i = 0; i < output_size; i++) {
-        float sum = bias[i];
-        for(int j = 0; j < input_size; j++) {
-            sum += input[j] * weights[i * input_size + j];
+static float* dense_forward(const float* input, int input_size,
+                            const float* weights, const float* bias,
+                            int output_size) {
+    float* output = (float*)calloc(output_size, sizeof(float));
+    if (!output) {
+        fprintf(stderr, "Failed to allocate memory for dense_forward output.\n");
+        return NULL;
+    }
+    for (int o = 0; o < output_size; o++) {
+        float sum = bias[o];
+        for (int i = 0; i < input_size; i++) {
+            sum += input[i] * weights[o * input_size + i];
         }
-        output[i] = relu(sum);
+        if (sum < 0) sum = 0; // ReLU activation
+        output[o] = sum;
     }
+    return output;
 }
 
-bool detector_init(const char* weights_dir) {
-    char filepath[256];
-    FILE* fp;
-    
-    // Load conv1 weights
-    snprintf(filepath, sizeof(filepath), "%s/conv1_weights.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        fprintf(stderr, "Failed to load weights: %s\n", filepath);
-        return false;
-    }
-    
-    model.conv1_weights = malloc(CONV1_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * sizeof(float));
-    if(!model.conv1_weights) {
-        fclose(fp);
-        return false;
-    }
-    
-    if(fread(model.conv1_weights, sizeof(float), 
-             CONV1_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE, fp) != 
-             CONV1_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE) {
-        fclose(fp);
-        return false;
-    }
-    fclose(fp);
-    
-    // Load conv1 bias
-    snprintf(filepath, sizeof(filepath), "%s/conv1_bias.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        detector_cleanup();
-        return false;
-    }
-    
-    model.conv1_bias = malloc(CONV1_FILTERS * sizeof(float));
-    if(!model.conv1_bias) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    
-    if(fread(model.conv1_bias, sizeof(float), CONV1_FILTERS, fp) != CONV1_FILTERS) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    fclose(fp);
+//---------------------------------------------------------------------
+// Forward pass through the CNN
+//---------------------------------------------------------------------
+static float* forward_pass(const float* spectrogram) {
+    // Assume spectrogram is a flattened array with shape [INPUT_HEIGHT * INPUT_WIDTH]
+    // Step 1: Convolution Layer 1
+    float* conv1 = conv2d_forward(spectrogram, INPUT_HEIGHT, INPUT_WIDTH, 1,
+                                  model.conv1_weights, model.conv1_bias,
+                                  CONV_KERNEL_SIZE, CONV1_FILTERS);
+    if (!conv1) return NULL;
+    // Step 2: Max Pooling Layer 1
+    int conv1_out_h = INPUT_HEIGHT - CONV_KERNEL_SIZE + 1;
+    int conv1_out_w = INPUT_WIDTH - CONV_KERNEL_SIZE + 1;
+    float* pool1 = max_pool2d_forward(conv1, conv1_out_h, conv1_out_w, CONV1_FILTERS, POOL_SIZE);
+    free(conv1);
+    if (!pool1) return NULL;
 
-    // Load conv2 weights
-    snprintf(filepath, sizeof(filepath), "%s/conv2_weights.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        detector_cleanup();
-        return false;
-    }
-    
-    model.conv2_weights = malloc(CONV2_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * CONV1_FILTERS * sizeof(float));
-    if(!model.conv2_weights) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    
-    if(fread(model.conv2_weights, sizeof(float), 
-             CONV2_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * CONV1_FILTERS, fp) != 
-             CONV2_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * CONV1_FILTERS) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    fclose(fp);
+    // Step 3: Convolution Layer 2
+    int pool1_h = conv1_out_h / POOL_SIZE;
+    int pool1_w = conv1_out_w / POOL_SIZE;
+    float* conv2 = conv2d_forward(pool1, pool1_h, pool1_w, CONV1_FILTERS,
+                                  model.conv2_weights, model.conv2_bias,
+                                  CONV_KERNEL_SIZE, CONV2_FILTERS);
+    free(pool1);
+    if (!conv2) return NULL;
 
-    // Load conv2 bias
-    snprintf(filepath, sizeof(filepath), "%s/conv2_bias.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        detector_cleanup();
-        return false;
-    }
-    
-    model.conv2_bias = malloc(CONV2_FILTERS * sizeof(float));
-    if(!model.conv2_bias) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    
-    if(fread(model.conv2_bias, sizeof(float), CONV2_FILTERS, fp) != CONV2_FILTERS) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    fclose(fp);
+    // Step 4: Max Pooling Layer 2
+    int conv2_out_h = pool1_h - CONV_KERNEL_SIZE + 1;
+    int conv2_out_w = pool1_w - CONV_KERNEL_SIZE + 1;
+    float* pool2 = max_pool2d_forward(conv2, conv2_out_h, conv2_out_w, CONV2_FILTERS, POOL_SIZE);
+    free(conv2);
+    if (!pool2) return NULL;
 
-    // Load conv3 weights
-    snprintf(filepath, sizeof(filepath), "%s/conv3_weights.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        detector_cleanup();
-        return false;
-    }
-    
-    model.conv3_weights = malloc(CONV3_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * CONV2_FILTERS * sizeof(float));
-    if(!model.conv3_weights) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    
-    if(fread(model.conv3_weights, sizeof(float), 
-             CONV3_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * CONV2_FILTERS, fp) != 
-             CONV3_FILTERS * CONV_KERNEL_SIZE * CONV_KERNEL_SIZE * CONV2_FILTERS) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    fclose(fp);
+    // Step 5: Convolution Layer 3
+    int pool2_h = conv2_out_h / POOL_SIZE;
+    int pool2_w = conv2_out_w / POOL_SIZE;
+    float* conv3 = conv2d_forward(pool2, pool2_h, pool2_w, CONV2_FILTERS,
+                                  model.conv3_weights, model.conv3_bias,
+                                  CONV_KERNEL_SIZE, CONV3_FILTERS);
+    free(pool2);
+    if (!conv3) return NULL;
 
-    // Load conv3 bias
-    snprintf(filepath, sizeof(filepath), "%s/conv3_bias.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        detector_cleanup();
-        return false;
-    }
-    
-    model.conv3_bias = malloc(CONV3_FILTERS * sizeof(float));
-    if(!model.conv3_bias) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    
-    if(fread(model.conv3_bias, sizeof(float), CONV3_FILTERS, fp) != CONV3_FILTERS) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    fclose(fp);
+    // Step 6: Max Pooling Layer 3
+    int conv3_out_h = (pool2_h - CONV_KERNEL_SIZE + 1);
+    int conv3_out_w = (pool2_w - CONV_KERNEL_SIZE + 1);
+    float* pool3 = max_pool2d_forward(conv3, conv3_out_h, conv3_out_w, CONV3_FILTERS, POOL_SIZE);
+    free(conv3);
+    if (!pool3) return NULL;
 
-    // Load dense1 weights
-    snprintf(filepath, sizeof(filepath), "%s/dense1_weights.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        detector_cleanup();
-        return false;
+    // Step 7: Flatten the output for the Dense layer
+    int flattened_size = (conv3_out_h / POOL_SIZE) * (conv3_out_w / POOL_SIZE) * CONV3_FILTERS;
+    float* flattened = (float*)malloc(sizeof(float) * flattened_size);
+    if (!flattened) {
+        fprintf(stderr, "Failed to allocate memory for flatten layer.\n");
+        free(pool3);
+        return NULL;
     }
-    
-    int flattened_size = POOL3_SIZE * CONV3_FILTERS;
-    model.dense1_weights = malloc(DENSE1_UNITS * flattened_size * sizeof(float));
-    if(!model.dense1_weights) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
+    for (int i = 0; i < flattened_size; i++) {
+        flattened[i] = pool3[i];
     }
-    
-    if(fread(model.dense1_weights, sizeof(float), DENSE1_UNITS * flattened_size, fp) != 
-             DENSE1_UNITS * flattened_size) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    fclose(fp);
+    free(pool3);
 
-    // Load dense1 bias
-    snprintf(filepath, sizeof(filepath), "%s/dense1_bias.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        detector_cleanup();
-        return false;
-    }
-    
-    model.dense1_bias = malloc(DENSE1_UNITS * sizeof(float));
-    if(!model.dense1_bias) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    
-    if(fread(model.dense1_bias, sizeof(float), DENSE1_UNITS, fp) != DENSE1_UNITS) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    fclose(fp);
+    // Step 8: Dense Layer 1
+    float* dense1 = dense_forward(flattened, flattened_size,
+                                  model.dense1_weights, model.dense1_bias,
+                                  DENSE1_UNITS);
+    free(flattened);
+    if (!dense1) return NULL;
 
-    // Load dense2 weights
-    snprintf(filepath, sizeof(filepath), "%s/dense2_weights.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        detector_cleanup();
-        return false;
-    }
-    
-    model.dense2_weights = malloc(2 * DENSE1_UNITS * sizeof(float));
-    if(!model.dense2_weights) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    
-    if(fread(model.dense2_weights, sizeof(float), 2 * DENSE1_UNITS, fp) != 2 * DENSE1_UNITS) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    fclose(fp);
+    // Step 9: Dense Layer 2 (Output Layer)
+    float* dense2 = dense_forward(dense1, DENSE1_UNITS,
+                                  model.dense2_weights, model.dense2_bias,
+                                  2);
+    free(dense1);
+    if (!dense2) return NULL;
 
-    // Load dense2 bias
-    snprintf(filepath, sizeof(filepath), "%s/dense2_bias.bin", weights_dir);
-    fp = fopen(filepath, "rb");
-    if(!fp) {
-        detector_cleanup();
-        return false;
-    }
-    
-    model.dense2_bias = malloc(2 * sizeof(float));
-    if(!model.dense2_bias) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    
-    if(fread(model.dense2_bias, sizeof(float), 2, fp) != 2) {
-        fclose(fp);
-        detector_cleanup();
-        return false;
-    }
-    fclose(fp);
-    
-    model.initialized = true;
-    return true;
+    // Step 10: Apply Softmax to obtain probabilities
+    softmax(dense2, 2);
+    return dense2;  // Contains probabilities for [Background, Bubble]
 }
 
-DetectionResult detector_process_frame(float* spectrogram, int size) {
-    if(!model.initialized || size != INPUT_HEIGHT) {
+//---------------------------------------------------------------------
+// Process a single spectrogram frame using the CNN
+//---------------------------------------------------------------------
+DetectionResult detector_process_frame(float* spectrogram) {
+    if (!is_initialized) {
+        fprintf(stderr, "Detector is not initialized. Call detector_init first.\n");
         return DETECTION_BACKGROUND;
     }
-    
-    float* conv1_output = malloc(CONV1_SIZE * sizeof(float));
-    float* pool1_output = malloc(POOL1_SIZE * sizeof(float));
-    float* conv2_output = malloc(CONV2_SIZE * sizeof(float));
-    float* pool2_output = malloc(POOL2_SIZE * sizeof(float));
-    float* conv3_output = malloc(CONV3_SIZE * sizeof(float));
-    float* pool3_output = malloc(POOL3_SIZE * sizeof(float));
-    float* dense1_output = malloc(DENSE1_UNITS * sizeof(float));
-    float* final_output = malloc(2 * sizeof(float));
-    
-    if(!conv1_output || !pool1_output || !conv2_output || !pool2_output ||
-       !conv3_output || !pool3_output || !dense1_output || !final_output) {
-        free(conv1_output);
-        free(pool1_output);
-        free(conv2_output);
-        free(pool2_output);
-        free(conv3_output);
-        free(pool3_output);
-        free(dense1_output);
-        free(final_output);
+    float* probabilities = forward_pass(spectrogram);
+    if (!probabilities) {
+        fprintf(stderr, "Forward pass failed.\n");
         return DETECTION_BACKGROUND;
     }
-    
-    // Normalize input
-    float max_val = 0.0f;
-    for(int i = 0; i < size; i++) {
-        if(spectrogram[i] > max_val) max_val = spectrogram[i];
+    DetectionResult result = DETECTION_BACKGROUND;
+    if (probabilities[1] > 0.5f) { // Assuming index 1 corresponds to "Bubble"
+        result = DETECTION_BUBBLE;
     }
-    if(max_val > 0) {
-        for(int i = 0; i < size; i++) {
-            spectrogram[i] /= max_val;
-        }
-    }
-    
-    // Forward pass through network
-    // Conv1 + Pool1
-    conv2d(spectrogram, INPUT_HEIGHT, INPUT_WIDTH, 1,
-           model.conv1_weights, model.conv1_bias,
-           CONV_KERNEL_SIZE, CONV1_FILTERS, conv1_output);
-    
-    max_pool_2d(conv1_output, 
-                INPUT_HEIGHT - CONV_KERNEL_SIZE + 1,
-                INPUT_WIDTH - CONV_KERNEL_SIZE + 1,
-                CONV1_FILTERS, pool1_output);
-    
-    // Conv2 + Pool2
-    conv2d(pool1_output, POOL1_HEIGHT, POOL1_WIDTH, CONV1_FILTERS,
-           model.conv2_weights, model.conv2_bias,
-           CONV_KERNEL_SIZE, CONV2_FILTERS, conv2_output);
-    
-    max_pool_2d(conv2_output,
-                POOL1_HEIGHT - CONV_KERNEL_SIZE + 1,
-                POOL1_WIDTH - CONV_KERNEL_SIZE + 1,
-                CONV2_FILTERS, pool2_output);
-    
-    // Conv3 + Pool3
-    conv2d(pool2_output, POOL2_HEIGHT, POOL2_WIDTH, CONV2_FILTERS,
-           model.conv3_weights, model.conv3_bias,
-           CONV_KERNEL_SIZE, CONV3_FILTERS, conv3_output);
-    
-    max_pool_2d(conv3_output,
-                POOL2_HEIGHT - CONV_KERNEL_SIZE + 1,
-                POOL2_WIDTH - CONV_KERNEL_SIZE + 1,
-                CONV3_FILTERS, pool3_output);
-    
-    // Dense1 (fully connected layer)
-    int flattened_size = POOL3_SIZE * CONV3_FILTERS;
-    dense_layer(pool3_output, flattened_size,
-                model.dense1_weights, model.dense1_bias,
-                DENSE1_UNITS, dense1_output);
-    
-    // Dense2 (output layer)
-    dense_layer(dense1_output, DENSE1_UNITS,
-                model.dense2_weights, model.dense2_bias,
-                2, final_output);
-    
-    // Apply softmax to get probabilities
-    softmax(final_output, 2);
-    
-    // Get prediction
-    DetectionResult result = (final_output[1] > 0.5f) ? DETECTION_BUBBLE : DETECTION_BACKGROUND;
-    
-    // Cleanup
-    free(conv1_output);
-    free(pool1_output);
-    free(conv2_output);
-    free(pool2_output);
-    free(conv3_output);
-    free(pool3_output);
-    free(dense1_output);
-    free(final_output);
-    
+    free(probabilities);
     return result;
 }
 
+//---------------------------------------------------------------------
+// Cleanup: free all allocated CNN resources
+//---------------------------------------------------------------------
 void detector_cleanup(void) {
-    if(model.initialized) {
-        free(model.conv1_weights);
-        free(model.conv1_bias);
-        free(model.conv2_weights);
-        free(model.conv2_bias);
-        free(model.conv3_weights);
-        free(model.conv3_bias);
-        free(model.dense1_weights);
-        free(model.dense1_bias);
-        free(model.dense2_weights);
-        free(model.dense2_bias);
-        model.initialized = false;
-    }
+    if (!is_initialized) return;
+    free(model.conv1_weights);
+    free(model.conv1_bias);
+    free(model.conv2_weights);
+    free(model.conv2_bias);
+    free(model.conv3_weights);
+    free(model.conv3_bias);
+    free(model.dense1_weights);
+    free(model.dense1_bias);
+    free(model.dense2_weights);
+    free(model.dense2_bias);
+    memset(&model, 0, sizeof(CNNModel));
+    is_initialized = 0;
 }
 
-#endif  // End of CNN_ENABLED
+#endif // CNN_ENABLED
