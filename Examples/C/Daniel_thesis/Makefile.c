@@ -11,9 +11,11 @@ LDLIBS = -lm -lpthread -lrp -lfftw3f
 
 # Determine if CNN should be included based on environment variable
 ifeq ($(MODEL_PATH),)
-    SRCS = spectrogram_acquisition.c spec_dsp.c  # No CNN
+    # No CNN
+    SRCS = spectrogram_acquisition.c stft_dsp.c
 else
-    SRCS = spectrogram_acquisition.c spec_dsp.c bubble_detector.c  # Include CNN
+    # Include CNN
+    SRCS = spectrogram_acquisition.c stft_dsp.c bubble_detector.c
     CFLAGS += -DCNN_ENABLED  # Define CNN_ENABLED for conditional compilation
 endif
 
@@ -28,12 +30,12 @@ $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $(TARGET) $(LDFLAGS) $(LDLIBS)
 
 %.o: %.c
-	$(CC) -c $(CFLAGS) $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
 	rm -f $(OBJS) $(TARGET)
 
 # Dependencies
-spectrogram_acquisition.o: spectrogram_acquisition.c spec_dsp.h bubble_detector.h
-spec_dsp.o: spec_dsp.c spec_dsp.h
+spectrogram_acquisition.o: spectrogram_acquisition.c stft_dsp.h bubble_detector.h
+stft_dsp.o: stft_dsp.c stft_dsp.h
 bubble_detector.o: bubble_detector.c bubble_detector.h
