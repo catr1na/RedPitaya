@@ -6,7 +6,7 @@
  *   Mode 0: CNN detection (if CNN_ENABLED is defined)
  *   Mode 1: Background Save – process and save every 20ms chunk
  *   Mode 2: Trigger Save – process and save a chunk only if at least one sample
- *           exceeds a 10 mV threshold
+ *           exceeds a 10 mV threshold, with acquisition triggered on IN1.
  ****************************************************************************/
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,7 +39,7 @@ typedef struct {
     bool processed;
 } Buffer;
 
-// Circular buffer structure
+// Circular buffer structure.
 typedef struct {
     Buffer buffers[BUFFER_COUNT];
     int write_index;
@@ -55,16 +55,16 @@ static char* output_directory = NULL;
 static volatile bool running_flag = true;
 static uint32_t frame_counter = 0;
 
-// STFT parameters
+// STFT parameters.
 static STFT_Handle* stft_handle = NULL;
 static int nperseg = 1024;      // Sub-window size (should yield 38 sub-windows per 20ms chunk)
 static int noverlap = 0;        // No overlap between sub-windows
 
-// Global flag for trigger saving mode
+// Global flag for trigger saving mode.
 bool trigger_mode_enabled = false;
 
 //
-// Signal handler for clean exit (Ctrl+C, SIGTERM)
+// Signal handler for clean exit (Ctrl+C, SIGTERM).
 //
 void signal_handler(int signum) {
     running_flag = false;
@@ -73,7 +73,7 @@ void signal_handler(int signum) {
 }
 
 //
-// Initialize the circular buffer and its buffers
+// Initialize the circular buffer and its buffers.
 //
 void init_circular_buffer() {
     cbuf.write_index = 0;
@@ -94,7 +94,7 @@ void init_circular_buffer() {
 }
 
 //
-// Cleanup system resources (buffers, STFT, CNN, RP resources)
+// Cleanup system resources (buffers, STFT, CNN, RP resources).
 //
 void cleanup_system() {
     for (int i = 0; i < BUFFER_COUNT; i++) {
@@ -180,7 +180,7 @@ static void run_cnn_detection(float* stft_power_db, int num_subwindows, int fft_
 //
 // Process one buffer from the circular buffer.
 // In trigger mode, first scan the time-domain data for any sample above TRIGGER_THRESHOLD.
-// Then compute the STFT and either save the binary file (if saving mode) or run the CNN.
+// Then compute the STFT and either save the binary file (if saving mode) or pass to the CNN.
 //
 void process_buffer(int index) {
     float* time_data = cbuf.buffers[index].data;
@@ -346,9 +346,23 @@ int main(int argc, char** argv) {
         return 1;
     }
     rp_AcqReset();
+
+    // Set acquisition parameters based on mode.
+    if (trigger_mode_enabled) {
+        // In trigger mode, wait for a trigger on Channel A positive edge.
+        rp_AcqSetTriggerSrc(RP_TRIG_SRC_CHA_PE);
+        // Set the trigger level on channel A using the trigger channel identifier.
+        rp_AcqSetTriggerLevel(RP_T_CH_1, TRIGGER_THRESHOLD);
+        // Set a trigger delay to capture pre-trigger data (here, half the 20ms chunk).
+        rp_AcqSetTriggerDelay(SAMPLES_20MS / 2);
+    }
+    else {
+        rp_AcqSetTriggerSrc(RP_TRIG_SRC_NOW);
+        rp_AcqSetTriggerLevel(RP_T_CH_1, 0.5f);
+        rp_AcqSetTriggerDelay(0);
+    }
+    
     rp_AcqSetDecimation(DECIMATION);
-    rp_AcqSetTriggerLevel(RP_CH_1, 0.5f);
-    rp_AcqSetTriggerDelay(0);
 
     // Initialize STFT.
     stft_handle = stft_init(nperseg, noverlap);
@@ -360,7 +374,11 @@ int main(int argc, char** argv) {
 
     init_circular_buffer();
     rp_AcqStart();
-    rp_AcqSetTriggerSrc(RP_TRIG_SRC_NOW);
+
+    // For immediate (background) mode, ensure acquisition starts immediately.
+    if (!trigger_mode_enabled) {
+        rp_AcqSetTriggerSrc(RP_TRIG_SRC_NOW);
+    }
 
     // Create acquisition and processing threads.
     pthread_t acq_thread, proc_thread;
