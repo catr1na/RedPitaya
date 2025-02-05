@@ -1,60 +1,127 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Jan 29 14:21:35 2025
-
-@author: danielcampos
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.interpolate import interp2d
 
-file_path="/Users/danielcampos/Desktop/output/output/"
-bin_num=100 #Has to be greater than 1
-
-def read_spectrogram_files(directory, num_files):
-    spectrograms = []
-    times = []
+def load_spectrogram_file(filename):
+    """
+    Reads a binary file saved by your C code.
+    File format:
+      - 7 unsigned 32-bit integers (metadata):
+          meta[0] = SAMPLES_20MS (number of time-domain samples)
+          meta[1] = nperseg (FFT sub-window size)
+          meta[2] = noverlap (overlap count)
+          meta[3] = num_subwindows (number of STFT frames, e.g. 38)
+          meta[4] = fft_out_size (number of frequency bins, e.g. 513)
+          meta[5] = effective sample rate
+          meta[6] = time offset (ms)
+      - SAMPLES_20MS floats (raw time-domain data)
+      - (num_subwindows * fft_out_size) floats (STFT power array in dB, row-major)
+    """
+    # Read metadata: 7 uint32 values (each 4 bytes)
+    meta = np.fromfile(filename, dtype=np.uint32, count=7)
+    if meta.size < 7:
+        raise ValueError("File too short: cannot read metadata.")
     
-    for i in range(num_files):
-        filename = f"{directory}/spectrogram_{i:06d}.bin"
-        with open(filename, 'rb') as f:
-            # Read metadata
-            metadata = np.fromfile(f, dtype=np.uint32, count=4)
-            n_samples, n_freq_bins, sample_rate, time_offset = metadata
-            
-            # Skip time domain and magnitude data
-            f.seek(n_samples * 4 + n_freq_bins * 4, 1)  # 4 bytes per float
-            
-            # Read dB values
-            power_db = np.fromfile(f, dtype=np.float32, count=n_freq_bins)
-            
-            spectrograms.append(power_db)
-            times.append(time_offset / 1000.0)  # Convert to seconds
+    samples_20ms   = meta[0]
+    nperseg        = meta[1]
+    noverlap       = meta[2]
+    num_subwindows = meta[3]
+    fft_out_size   = meta[4]
+    effective_sr   = meta[5]
+    time_offset    = meta[6]
     
-    return np.array(spectrograms), np.array(times), sample_rate
+    # Calculate byte offsets:
+    meta_bytes      = 7 * 4  # 7 uint32's = 28 bytes
+    raw_time_bytes  = samples_20ms * 4  # each float is 4 bytes
+    stft_offset     = meta_bytes + raw_time_bytes
+    
+    # Read raw time-domain data (if needed)
+    raw_time = np.fromfile(filename, dtype=np.float32, count=samples_20ms, offset=meta_bytes)
+    
+    # Read STFT data (spectrogram)
+    stft_data = np.fromfile(filename, dtype=np.float32, count=num_subwindows * fft_out_size, offset=stft_offset)
+    stft_data = stft_data.reshape((num_subwindows, fft_out_size))
+    
+    return {
+        'samples_20ms': samples_20ms,
+        'nperseg': nperseg,
+        'noverlap': noverlap,
+        'num_subwindows': num_subwindows,
+        'fft_out_size': fft_out_size,
+        'effective_sr': effective_sr,
+        'time_offset': time_offset,
+        'raw_time': raw_time,
+        'stft': stft_data
+    }
 
-# Read 201 frames
-spec_data, times, sample_rate = read_spectrogram_files(file_path, bin_num)
+def plot_spectrogram(spectrogram, nperseg, effective_sr):
+    """
+    Plot the full 2D spectrogram.
+    - The x-axis corresponds to time (each sub-window is nperseg/effective_sr seconds)
+    - The y-axis corresponds to frequency (from 0 to effective_sr/2)
+    """
+    num_subwindows = spectrogram.shape[0]
+    fft_out_size   = spectrogram.shape[1]
+    dt = nperseg / effective_sr  # time per subwindow in seconds
+    time_axis = np.arange(num_subwindows) * dt * 1000  # convert to milliseconds
+    freq_axis = np.linspace(0, effective_sr/2, fft_out_size)
+    
+    plt.figure(figsize=(10, 6))
+    plt.imshow(spectrogram.T, aspect='auto', origin='lower',
+               extent=[time_axis[0], time_axis[-1], freq_axis[0], freq_axis[-1]])
+    plt.xlabel("Time (ms)")
+    plt.ylabel("Frequency (Hz)")
+    plt.title("Spectrogram (20 ms chunk)")
+    plt.colorbar(label="Magnitude (dB)")
+    plt.show()
 
-# Create original linear frequency axis
-orig_freqs = np.linspace(0, sample_rate/2, spec_data.shape[1])
+def plot_spectrogram(spectrogram, nperseg, effective_sr):
+    """
+    Plot the full 2D spectrogram with a logarithmic frequency scale.
+    - The x-axis corresponds to time (each sub-window is nperseg/effective_sr seconds)
+    - The y-axis corresponds to frequency (log scale from 0 to effective_sr/2)
+    """
+    num_subwindows = spectrogram.shape[0]
+    fft_out_size   = spectrogram.shape[1]
+    dt = nperseg / effective_sr  # time per subwindow in seconds
+    time_axis = np.arange(num_subwindows) * dt * 1000  # convert to milliseconds
+    freq_axis = np.linspace(0, effective_sr/2, fft_out_size)
 
-# Define new logarithmically spaced frequency axis
-log_freqs = np.geomspace(orig_freqs[1], orig_freqs[-1], spec_data.shape[1])  # Start from orig_freqs[1] to avoid log(0)
+    plt.figure(figsize=(10, 6))
+    plt.imshow(spectrogram.T, aspect='auto', origin='lower',
+               extent=[time_axis[0], time_axis[-1], freq_axis[0], freq_axis[-1]])
+    plt.yscale('log')  # Set log scale for the frequency axis
+    plt.ylim(freq_axis[1], freq_axis[-1])  # Avoid log(0) issue
+    plt.xlabel("Time (ms)")
+    plt.ylabel("Frequency (Hz) [Log Scale]")
+    plt.title("Spectrogram (20 ms chunk)")
+    plt.colorbar(label="Magnitude (dB)")
+    plt.show()
 
-# Interpolate spectrogram data onto the log frequency scale
-interp_func = interp2d(times, orig_freqs, spec_data.T, kind='linear')
-log_spec_data = interp_func(times, log_freqs)
+# --- Main code ---
 
-# Plot the spectrogram
-plt.figure(figsize=(10, 6))
-plt.pcolormesh(times, log_freqs, log_spec_data, shading='gouraud')
-plt.colorbar(label='Power (dB)')
-plt.ylabel('Frequency (Hz)')
-plt.xlabel('Time (s)')
-plt.title('Spectrogram (Log Frequency Scale)')
-plt.yscale('log')  # Set y-axis to logarithmic scale
-plt.ylim([log_freqs.min(), log_freqs.max()])  # Ensure correct limits
-plt.show()
+# You can change the filename as needed.
+
+path_folder = "/Users/danielcampos/Desktop/output/output/"
+
+file_number = input("Enter the spectrogram file number (e.g., 100): ").strip()
+
+# Format the filename as 'stft_000XXX.bin'
+filename = f"stft_{int(file_number):06d}.bin"  # Ensures zero-padding to 6 digits
+full_path = path_folder + filename  # Combine with the directory path
+
+data = load_spectrogram_file(full_path)
+
+stft_data = data['stft']
+nperseg = data['nperseg']
+effective_sr = data['effective_sr']
+
+print("Metadata:")
+print(f"  Samples per 20ms chunk: {data['samples_20ms']}")
+print(f"  nperseg: {nperseg}")
+print(f"  noverlap: {data['noverlap']}")
+print(f"  Number of subwindows: {data['num_subwindows']}")
+print(f"  FFT output size (bins): {data['fft_out_size']}")
+print(f"  Effective sample rate: {effective_sr}")
+print(f"  Time offset (ms): {data['time_offset']}")
+
+plot_spectrogram(stft_data, nperseg, effective_sr)
