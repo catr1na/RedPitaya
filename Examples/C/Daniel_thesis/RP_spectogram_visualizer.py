@@ -1,3 +1,20 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Feb  3 13:03:06 2025
+
+@author: danielcampos
+"""
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Feb  3 12:51:29 2025
+
+@author: danielcampos
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -53,26 +70,6 @@ def load_spectrogram_file(filename):
         'stft': stft_data
     }
 
-def plot_spectrogram(spectrogram, nperseg, effective_sr):
-    """
-    Plot the full 2D spectrogram.
-    - The x-axis corresponds to time (each sub-window is nperseg/effective_sr seconds)
-    - The y-axis corresponds to frequency (from 0 to effective_sr/2)
-    """
-    num_subwindows = spectrogram.shape[0]
-    fft_out_size   = spectrogram.shape[1]
-    dt = nperseg / effective_sr  # time per subwindow in seconds
-    time_axis = np.arange(num_subwindows) * dt * 1000  # convert to milliseconds
-    freq_axis = np.linspace(0, effective_sr/2, fft_out_size)
-    
-    plt.figure(figsize=(10, 6))
-    plt.imshow(spectrogram.T, aspect='auto', origin='lower',
-               extent=[time_axis[0], time_axis[-1], freq_axis[0], freq_axis[-1]])
-    plt.xlabel("Time (ms)")
-    plt.ylabel("Frequency (Hz)")
-    plt.title("Spectrogram (20 ms chunk)")
-    plt.colorbar(label="Magnitude (dB)")
-    plt.show()
 
 def plot_spectrogram(spectrogram, nperseg, effective_sr):
     """
@@ -101,7 +98,7 @@ def plot_spectrogram(spectrogram, nperseg, effective_sr):
 
 # You can change the filename as needed.
 
-path_folder = "/Users/danielcampos/Desktop/output/output/"
+path_folder = "/Users/danielcampos/Desktop/diag_output3.5/"
 
 file_number = input("Enter the spectrogram file number (e.g., 100): ").strip()
 
