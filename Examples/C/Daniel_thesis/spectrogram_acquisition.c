@@ -1,12 +1,11 @@
 /****************************************************************************
  * spectrogram_acquisition.c
- * Now using STFT with 38 FFTs per 20ms chunk and no overlap between sub-windows.
+ * Using STFT with 38 FFTs per 20ms chunk (nperseg=256, no overlap).
  *
  * Modes:
- *   Mode 0: CNN detection (if CNN_ENABLED is defined)
- *   Mode 1: Background Save – process and save every 20ms chunk
- *   Mode 2: Trigger Save – process and save a chunk only if at least one sample
- *           exceeds a 10 mV threshold, with acquisition triggered on IN1.
+ *   Mode 0: CNN detection (if CNN_ENABLED is defined), no trigger
+ *   Mode 1: Background Save (no trigger)
+ *   Mode 2: Trigger Save (hardware trigger on IN1 at 15 mV)
  ****************************************************************************/
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,34 +19,37 @@
 #include "stft_dsp.h"          // STFT code
 #include "bubble_detector.h"   // CNN (if enabled)
 
+// Red Pitaya sample rate and decimation
 #define SAMPLE_RATE      125000000
-#define DECIMATION       RP_DEC_64
-#define EFFECTIVE_SR     (SAMPLE_RATE / 64.0) // ~1.953125e6
-#define CHUNK_DURATION_S 0.02                // 20 ms
-#define SAMPLES_20MS     (uint32_t)(EFFECTIVE_SR * CHUNK_DURATION_S) // ~39062 samples
+#define DECIMATION       RP_DEC_256
+#define EFFECTIVE_SR     (SAMPLE_RATE / (float)DECIMATION) // ~488281.25
+
+// 20 ms chunk => ~9765 samples at decimation=256
+#define CHUNK_DURATION_S 0.02
+#define SAMPLES_20MS     ((uint32_t)(EFFECTIVE_SR * CHUNK_DURATION_S + 0.5f))
 
 // Number of ring buffer slots
-#define BUFFER_COUNT 32
+#define BUFFER_COUNT     32
 
-// Trigger threshold: 10 mV = 0.01 V
-#define TRIGGER_THRESHOLD 0.01f
+// Trigger threshold: 15 mV = 0.015 V
+#define TRIGGER_THRESHOLD 0.015f
 
-// Data buffer structure for one 20ms chunk.
+// Data buffer structure for one 20ms chunk
 typedef struct {
-    float* data;      // Time-domain samples for one 20ms chunk
-    bool ready;
-    bool processed;
+    float* data;  // Time-domain samples for one 20ms chunk
+    bool   ready;
+    bool   processed;
 } Buffer;
 
-// Circular buffer structure.
+// Circular buffer structure
 typedef struct {
     Buffer buffers[BUFFER_COUNT];
-    int write_index;
-    int read_index;
+    int  write_index;
+    int  read_index;
     bool running;
     bool save_to_file;
     pthread_mutex_t mutex;
-    pthread_cond_t data_ready;
+    pthread_cond_t  data_ready;
 } CircularBuffer;
 
 static CircularBuffer cbuf = {0};
@@ -55,16 +57,16 @@ static char* output_directory = NULL;
 static volatile bool running_flag = true;
 static uint32_t frame_counter = 0;
 
-// STFT parameters.
+// STFT parameters
 static STFT_Handle* stft_handle = NULL;
-static int nperseg = 1024;      // Sub-window size (should yield 38 sub-windows per 20ms chunk)
-static int noverlap = 0;        // No overlap between sub-windows
+static int nperseg = 256; // Sub-window size => expecting 38 sub-windows per chunk
+static int noverlap = 0;  // No overlap => hop=256
 
-// Global flag for trigger saving mode.
+// Global flag for trigger-saving logic in process_buffer
 bool trigger_mode_enabled = false;
 
 //
-// Signal handler for clean exit (Ctrl+C, SIGTERM).
+// Signal handler for clean exit (Ctrl+C, SIGTERM)
 //
 void signal_handler(int signum) {
     running_flag = false;
@@ -73,12 +75,12 @@ void signal_handler(int signum) {
 }
 
 //
-// Initialize the circular buffer and its buffers.
+// Initialize the circular buffer and its buffers
 //
 void init_circular_buffer() {
     cbuf.write_index = 0;
-    cbuf.read_index = 0;
-    cbuf.running = true;
+    cbuf.read_index  = 0;
+    cbuf.running     = true;
     pthread_mutex_init(&cbuf.mutex, NULL);
     pthread_cond_init(&cbuf.data_ready, NULL);
 
@@ -88,13 +90,13 @@ void init_circular_buffer() {
             fprintf(stderr, "Failed to allocate buffer %d\n", i);
             exit(1);
         }
-        cbuf.buffers[i].ready = false;
+        cbuf.buffers[i].ready     = false;
         cbuf.buffers[i].processed = true;
     }
 }
 
 //
-// Cleanup system resources (buffers, STFT, CNN, RP resources).
+// Cleanup system resources (buffers, STFT, CNN, RP resources)
 //
 void cleanup_system() {
     for (int i = 0; i < BUFFER_COUNT; i++) {
@@ -113,7 +115,7 @@ void cleanup_system() {
 }
 
 //
-// Acquisition thread: continuously acquires 20ms chunks from Red Pitaya.
+// Acquisition thread: continuously acquires 20ms chunks from IN1 (Channel A).
 //
 void* acquisition_thread(void* arg) {
     uint32_t buff_size = SAMPLES_20MS;
@@ -124,26 +126,26 @@ void* acquisition_thread(void* arg) {
     }
 
     while (cbuf.running) {
-        // Acquire 20ms of data.
+        // Acquire ~20ms of data from Channel A
         rp_AcqGetLatestDataV(RP_CH_1, &buff_size, temp_buffer);
 
         pthread_mutex_lock(&cbuf.mutex);
         if (!cbuf.buffers[cbuf.write_index].processed) {
             pthread_mutex_unlock(&cbuf.mutex);
-            usleep(1000); // Wait for buffer to be processed.
+            usleep(1000); // wait for buffer to be processed
             continue;
         }
 
-        // Copy the acquired data into the ring buffer.
+        // Copy the acquired data into the ring buffer
         memcpy(cbuf.buffers[cbuf.write_index].data, temp_buffer, SAMPLES_20MS * sizeof(float));
-        cbuf.buffers[cbuf.write_index].ready = true;
+        cbuf.buffers[cbuf.write_index].ready     = true;
         cbuf.buffers[cbuf.write_index].processed = false;
         cbuf.write_index = (cbuf.write_index + 1) % BUFFER_COUNT;
 
         pthread_cond_signal(&cbuf.data_ready);
         pthread_mutex_unlock(&cbuf.mutex);
 
-        // Sleep 10ms so consecutive 20ms chunks overlap by 10ms.
+        // Sleep 10ms => consecutive ~20ms chunks overlap by ~10ms
         usleep(10000);
     }
 
@@ -153,10 +155,10 @@ void* acquisition_thread(void* arg) {
 
 #ifdef CNN_ENABLED
 //
-// In CNN mode, process the 2D STFT array to prepare the input for the CNN.
+// In CNN mode, process the 2D STFT array and feed it to the detector
 //
 static void run_cnn_detection(float* stft_power_db, int num_subwindows, int fft_out_size) {
-    // Average across time sub-windows to produce a single frequency vector.
+    // Example: average across time sub-windows => single frequency vector
     float* freq_vector = (float*)malloc(fft_out_size * sizeof(float));
     if (!freq_vector) return;
 
@@ -168,6 +170,7 @@ static void run_cnn_detection(float* stft_power_db, int num_subwindows, int fft_
         freq_vector[f] = (float)(sum / num_subwindows);
     }
 
+    // Pass to CNN
     DetectionResult result = detector_process_frame(freq_vector);
     if (result == DETECTION_BUBBLE) {
         printf("Bubble detected at frame %u\n", frame_counter);
@@ -178,14 +181,14 @@ static void run_cnn_detection(float* stft_power_db, int num_subwindows, int fft_
 #endif
 
 //
-// Process one buffer from the circular buffer.
-// In trigger mode, first scan the time-domain data for any sample above TRIGGER_THRESHOLD.
-// Then compute the STFT and either save the binary file (if saving mode) or pass to the CNN.
+// Process one buffer from the circular buffer
+// If trigger_mode_enabled == true, we first verify the chunk has a sample >= TRIGGER_THRESHOLD.
+// Then compute STFT. If saving, write to .bin. Otherwise pass to CNN (mode 0).
 //
 void process_buffer(int index) {
     float* time_data = cbuf.buffers[index].data;
 
-    // In trigger mode, check if any sample exceeds the threshold.
+    // If trigger mode is enabled (Mode 2), check for a sample above threshold
     if (trigger_mode_enabled) {
         bool triggered = false;
         for (int i = 0; i < SAMPLES_20MS; i++) {
@@ -195,50 +198,51 @@ void process_buffer(int index) {
             }
         }
         if (!triggered) {
-            printf("Frame %u not triggered (max value below %.3f V). Skipping save.\n",
+            printf("Frame %u not triggered (max < %.3f V). Skipping.\n",
                    frame_counter, TRIGGER_THRESHOLD);
-            frame_counter++;  // Optionally count the frame even if not saved.
+            frame_counter++;
             return;
         }
     }
 
-    // Compute STFT.
-    int num_subwindows = (SAMPLES_20MS - nperseg) / (nperseg - noverlap) + 1; // Should be 38
+    // 1) Compute STFT
+    //    We want 38 subwindows => subwindow size=256 => no overlap => chunk ~9765
+    int hop = nperseg - noverlap;  // 256
+    int num_subwindows = (SAMPLES_20MS - nperseg) / hop + 1;
     if (num_subwindows != 38) {
-        fprintf(stderr, "process_buffer: Expected 38 sub-windows, got %d\n", num_subwindows);
+        fprintf(stderr,
+                "process_buffer: Expected 38 subwindows, got %d (SAMPLES_20MS=%u)\n",
+                num_subwindows, SAMPLES_20MS);
     }
-    int fft_out_size = nperseg / 2 + 1; // For nperseg=1024, fft_out_size = 513.
+
+    int fft_out_size = (nperseg / 2) + 1; // e.g. 129 for nperseg=256
     float* power_db_array = (float*)malloc(num_subwindows * fft_out_size * sizeof(float));
     if (!power_db_array) {
         fprintf(stderr, "process_buffer: Failed to allocate power_db_array\n");
         return;
     }
+
     int ret = stft_compute(stft_handle, time_data, SAMPLES_20MS, power_db_array);
-    if (ret != 38) {
-        fprintf(stderr, "process_buffer: STFT compute returned %d sub-windows, expected 38\n", ret);
+    if (ret != num_subwindows) {
+        fprintf(stderr, "process_buffer: stft_compute returned %d subwindows, expected %d\n",
+                ret, num_subwindows);
     }
 
-    // Depending on the mode, either save the STFT data to a file or pass it to the CNN.
+    // 2) If in saving mode => write .bin
     if (cbuf.save_to_file) {
         char filename[256];
-        uint32_t time_offset_ms = frame_counter * 10; // Each chunk starts 10ms later.
+        uint32_t time_offset_ms = frame_counter * 10;
         snprintf(filename, sizeof(filename), "%s/stft_%06u.bin", output_directory, frame_counter);
 
         FILE* fp = fopen(filename, "wb");
         if (!fp) {
-            fprintf(stderr, "process_buffer: Failed to open file %s for writing\n", filename);
+            fprintf(stderr, "process_buffer: Failed to open %s\n", filename);
             free(power_db_array);
             return;
         }
 
-        // Write metadata:
-        //   meta[0] = SAMPLES_20MS
-        //   meta[1] = nperseg
-        //   meta[2] = noverlap
-        //   meta[3] = num_subwindows
-        //   meta[4] = fft_out_size
-        //   meta[5] = (uint32_t) effective sample rate
-        //   meta[6] = time offset (ms)
+        // Write metadata: [SAMPLES_20MS, nperseg, noverlap, num_subwindows,
+        //                 fft_out_size, (uint32_t)(EFFECTIVE_SR), time_offset_ms]
         uint32_t meta[7];
         meta[0] = SAMPLES_20MS;
         meta[1] = nperseg;
@@ -249,10 +253,10 @@ void process_buffer(int index) {
         meta[6] = time_offset_ms;
         fwrite(meta, sizeof(uint32_t), 7, fp);
 
-        // Optionally store raw time-domain data.
+        // Optionally store raw time-domain data
         fwrite(time_data, sizeof(float), SAMPLES_20MS, fp);
 
-        // Write the 2D STFT power array (row-major: subwindow x frequency bin).
+        // Write STFT power array
         fwrite(power_db_array, sizeof(float), num_subwindows * fft_out_size, fp);
 
         fclose(fp);
@@ -260,6 +264,7 @@ void process_buffer(int index) {
     }
 #ifdef CNN_ENABLED
     else {
+        // Otherwise => CNN detection (mode 0)
         run_cnn_detection(power_db_array, num_subwindows, fft_out_size);
     }
 #endif
@@ -269,7 +274,7 @@ void process_buffer(int index) {
 }
 
 //
-// Processing thread: waits for data in the circular buffer, then processes it.
+// Processing thread: waits for new data in the ring buffer, processes it
 //
 void* processing_thread(void* arg) {
     while (cbuf.running) {
@@ -292,12 +297,14 @@ void* processing_thread(void* arg) {
 }
 
 //
-// Main: parse command-line arguments, initialize modules, start acquisition & processing threads.
+// Main: parse arguments, configure modes, init Red Pitaya & STFT, start threads
 //
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <mode> <output_dir_or_weights>\n", argv[0]);
-        fprintf(stderr, "  mode=0 => CNN detection, mode=1 => Background Save, mode=2 => Trigger Save\n");
+        fprintf(stderr, "  mode=0 => CNN detection (no trigger)\n");
+        fprintf(stderr, "  mode=1 => Background Save (no trigger)\n");
+        fprintf(stderr, "  mode=2 => Trigger Save (trigger on IN1 at 15 mV)\n");
         return 1;
     }
 
@@ -306,65 +313,74 @@ int main(int argc, char** argv) {
 
 #ifdef CNN_ENABLED
     if (mode == 0) {
-        // Initialize CNN detection.
+        // Mode 0: CNN detection, free-running
+        cbuf.save_to_file     = false;
+        trigger_mode_enabled  = false;
         if (!detector_init(output_directory)) {
             fprintf(stderr, "detector_init failed!\n");
             return 1;
         }
-        cbuf.save_to_file = false;
     }
-    else if (mode == 1 || mode == 2) {
-        // Saving mode.
-        cbuf.save_to_file = true;
-        if (mode == 2) {
-            trigger_mode_enabled = true;
-        }
+    else if (mode == 1) {
+        cbuf.save_to_file     = true;
+        trigger_mode_enabled  = false;
+    }
+    else if (mode == 2) {
+        cbuf.save_to_file     = true;
+        trigger_mode_enabled  = true;
     }
     else {
         fprintf(stderr, "Invalid mode %d\n", mode);
         return 1;
     }
 #else
-    if (mode != 1 && mode != 2) {
-        fprintf(stderr, "CNN disabled, only mode=1 (Background Save) or mode=2 (Trigger Save) are valid\n");
+    // CNN not enabled => only mode=1 or mode=2
+    if (mode == 0) {
+        fprintf(stderr, "CNN disabled.  Use mode=1 or mode=2.\n");
         return 1;
     }
-    printf("Running in save mode (CNN disabled).\n");
-    cbuf.save_to_file = true;
-    if (mode == 2) {
-        trigger_mode_enabled = true;
+    else if (mode == 1) {
+        cbuf.save_to_file     = true;
+        trigger_mode_enabled  = false;
+    }
+    else if (mode == 2) {
+        cbuf.save_to_file     = true;
+        trigger_mode_enabled  = true;
+    }
+    else {
+        fprintf(stderr, "Invalid mode %d\n", mode);
+        return 1;
     }
 #endif
 
-    // Install signal handlers for graceful shutdown.
+    // Handle Ctrl+C
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    // Initialize Red Pitaya.
+    // Initialize Red Pitaya
     if (rp_Init() != RP_OK) {
         fprintf(stderr, "rp_Init failed\n");
         return 1;
     }
     rp_AcqReset();
 
-    // Set acquisition parameters based on mode.
-    if (trigger_mode_enabled) {
-        // In trigger mode, wait for a trigger on Channel A positive edge.
-        rp_AcqSetTriggerSrc(RP_TRIG_SRC_CHA_PE);
-        // Set the trigger level on channel A using the trigger channel identifier.
-        rp_AcqSetTriggerLevel(RP_T_CH_1, TRIGGER_THRESHOLD);
-        // Set a trigger delay to capture pre-trigger data (here, half the 20ms chunk).
-        rp_AcqSetTriggerDelay(SAMPLES_20MS / 2);
-    }
-    else {
-        rp_AcqSetTriggerSrc(RP_TRIG_SRC_NOW);
-        rp_AcqSetTriggerLevel(RP_T_CH_1, 0.5f);
-        rp_AcqSetTriggerDelay(0);
-    }
-    
+    // Use decimation=256 => ~488 kS/s
     rp_AcqSetDecimation(DECIMATION);
 
-    // Initialize STFT.
+    // Trigger config
+    if (trigger_mode_enabled) {
+        // Mode 2 => hardware trigger on Channel A positive edge
+        rp_AcqSetTriggerSrc(RP_TRIG_SRC_CHA_PE);
+        rp_AcqSetTriggerLevel(RP_T_CH_1, TRIGGER_THRESHOLD);
+
+        // Pre-trigger: half chunk => ~10 ms
+        rp_AcqSetTriggerDelay(SAMPLES_20MS / 2);
+    } else {
+        // Mode 0 or 1 => free running
+        rp_AcqSetTriggerSrc(RP_TRIG_SRC_DISABLED);
+    }
+
+    // Initialize STFT
     stft_handle = stft_init(nperseg, noverlap);
     if (!stft_handle) {
         fprintf(stderr, "Failed to initialize STFT\n");
@@ -375,17 +391,12 @@ int main(int argc, char** argv) {
     init_circular_buffer();
     rp_AcqStart();
 
-    // For immediate (background) mode, ensure acquisition starts immediately.
-    if (!trigger_mode_enabled) {
-        rp_AcqSetTriggerSrc(RP_TRIG_SRC_NOW);
-    }
-
-    // Create acquisition and processing threads.
+    // Start threads
     pthread_t acq_thread, proc_thread;
     pthread_create(&acq_thread, NULL, acquisition_thread, NULL);
     pthread_create(&proc_thread, NULL, processing_thread, NULL);
 
-    // Wait for threads to finish.
+    // Wait for them to finish
     pthread_join(acq_thread, NULL);
     pthread_join(proc_thread, NULL);
 
