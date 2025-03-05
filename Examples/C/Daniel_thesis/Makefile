@@ -3,6 +3,7 @@ CC = gcc
 CFLAGS = -g -std=gnu11 -Wall -O2
 CFLAGS += -I/opt/redpitaya/include
 CFLAGS += -I/usr/local/include  # FFTW3 headers
+CFLAGS += $(TRIGGER)
 
 # Library paths and libraries
 LDFLAGS = -L/opt/redpitaya/lib
