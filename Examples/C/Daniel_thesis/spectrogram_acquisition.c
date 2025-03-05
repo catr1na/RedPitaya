@@ -32,7 +32,10 @@
 #define BUFFER_COUNT     32
 
 // Trigger threshold: 15 mV = 0.015 V
+#ifndef TRIGGER_THRESHOLD
 #define TRIGGER_THRESHOLD 0.015f
+#endif
+
 
 // Data buffer structure for one 20ms chunk
 typedef struct {
