@@ -128,6 +128,13 @@ void* acquisition_thread(void* arg) {
         return NULL;
     }
 
+    // Use CLOCK_MONOTONIC for a steady timer.
+    struct timespec next_time;
+    clock_gettime(CLOCK_MONOTONIC, &next_time);
+
+    // Set the period to 10ms (10,000,000 nanoseconds)
+    const long period_ns = 10000000; 
+
     while (cbuf.running) {
         // Acquire ~20ms of data from Channel A
         rp_AcqGetLatestDataV(RP_CH_1, &buff_size, temp_buffer);
@@ -135,21 +142,26 @@ void* acquisition_thread(void* arg) {
         pthread_mutex_lock(&cbuf.mutex);
         if (!cbuf.buffers[cbuf.write_index].processed) {
             pthread_mutex_unlock(&cbuf.mutex);
-            usleep(1000); // wait for buffer to be processed
+            // If buffer is not ready, wait a bit
+            usleep(1000);
             continue;
         }
-
-        // Copy the acquired data into the ring buffer
+        // Copy acquired data into the ring buffer
         memcpy(cbuf.buffers[cbuf.write_index].data, temp_buffer, SAMPLES_20MS * sizeof(float));
         cbuf.buffers[cbuf.write_index].ready     = true;
         cbuf.buffers[cbuf.write_index].processed = false;
         cbuf.write_index = (cbuf.write_index + 1) % BUFFER_COUNT;
-
         pthread_cond_signal(&cbuf.data_ready);
         pthread_mutex_unlock(&cbuf.mutex);
 
-        // Sleep 10ms => consecutive ~20ms chunks overlap by ~10ms
-        usleep(10000);
+        // Increment next_time by period_ns (10ms)
+        next_time.tv_nsec += period_ns;
+        if (next_time.tv_nsec >= 1000000000) {
+            next_time.tv_sec += next_time.tv_nsec / 1000000000;
+            next_time.tv_nsec = next_time.tv_nsec % 1000000000;
+        }
+        // Sleep until the absolute time next_time
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_time, NULL);
     }
 
     free(temp_buffer);
