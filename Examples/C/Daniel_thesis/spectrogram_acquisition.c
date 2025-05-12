@@ -195,15 +195,59 @@ static void run_cnn_detection(float* stft_power_db, int num_subwindows, int fft_
 }
 #endif
 
+//---------------------------------------------------------------------
+// New helper function: log-scale the STFT power array.
+// This converts a spectrogram with shape [num_subwindows x orig_freq_bins] 
+// (row-major order) into a new array with shape [new_freq_bins x num_subwindows]
+// using logarithmically spaced sampling along the frequency axis.
+static float* log_scale_spectrogram_c(const float* stft_power_db, int num_subwindows, int orig_freq_bins, int new_freq_bins) {
+    float* log_spec = (float*)malloc(new_freq_bins * num_subwindows * sizeof(float));
+    if (!log_spec) {
+        fprintf(stderr, "Failed to allocate memory for log-scaled spectrogram\n");
+        return NULL;
+    }
+    
+    // Compute maximum logarithmic index: we will remap the frequency axis from 0 to (orig_freq_bins-1)
+    double log_max = log10((double)(orig_freq_bins - 1));
+    
+    // For each time sub-window (each row in the original spectrogram)
+    for (int j = 0; j < num_subwindows; j++) {
+        // For each new frequency bin (each row in the output)
+        for (int i = 0; i < new_freq_bins; i++) {
+            // Compute the logarithmically spaced position.
+            double x_new = pow(10.0, (log_max * i) / (new_freq_bins - 1));
+            // Determine the two nearest indices for linear interpolation.
+            int lower = (int)floor(x_new);
+            int upper = lower + 1;
+            if (upper >= orig_freq_bins) {
+                upper = orig_freq_bins - 1;
+                lower = upper;
+            }
+            double fraction = x_new - lower;
+            // Original data is stored row-major: index = j * orig_freq_bins + frequency_index.
+            float v_lower = stft_power_db[j * orig_freq_bins + lower];
+            float v_upper = stft_power_db[j * orig_freq_bins + upper];
+            float interp_val = (float)((1.0 - fraction) * v_lower + fraction * v_upper);
+            // We store the output in row-major order with dimensions [new_freq_bins x num_subwindows].
+            // Element (i, j) is at index: i * num_subwindows + j.
+            log_spec[i * num_subwindows + j] = interp_val;
+        }
+    }
+    return log_spec;
+}
+
+//---------------------------------------------------------------------
+// Updated process_buffer: now the STFT is re-interpolated to log-scale
 //
 // Process one buffer from the circular buffer
 // If trigger_mode_enabled == true, we first verify the chunk has a sample >= TRIGGER_THRESHOLD.
 // Then compute STFT. If saving, write to .bin. Otherwise pass to CNN (mode 0).
 //
+//---------------------------------------------------------------------
 void process_buffer(int index) {
     float* time_data = cbuf.buffers[index].data;
 
-    // If trigger mode is enabled (Mode 2), check for a sample above threshold
+    // If trigger mode is enabled (Mode 2), check for a sample above threshold.
     if (trigger_mode_enabled) {
         bool triggered = false;
         for (int i = 0; i < SAMPLES_20MS; i++) {
@@ -213,78 +257,85 @@ void process_buffer(int index) {
             }
         }
         if (!triggered) {
-            printf("Frame %u not triggered (max < %.3f V). Skipping.\n",
-                   frame_counter, TRIGGER_THRESHOLD);
+            printf("Frame %u not triggered (max < %.3f V). Skipping.\n", frame_counter, TRIGGER_THRESHOLD);
             frame_counter++;
             return;
         }
     }
 
-    // 1) Compute STFT
-    //    We want 38 subwindows => subwindow size=256 => no overlap => chunk ~9765
+    // 1) Compute STFT.
+    //    For nperseg = 256 and noverlap = 0, expect 38 sub-windows and 129 frequency bins.
     int hop = nperseg - noverlap;  // 256
-    int num_subwindows = (SAMPLES_20MS - nperseg) / hop + 1;
-    if (num_subwindows != 38) {
-        fprintf(stderr,
-                "process_buffer: Expected 38 subwindows, got %d (SAMPLES_20MS=%u)\n",
-                num_subwindows, SAMPLES_20MS);
-    }
-
-    int fft_out_size = (nperseg / 2) + 1; // e.g. 129 for nperseg=256
+    int num_subwindows = (SAMPLES_20MS - nperseg) / hop + 1;  // expected to be 38
+    int fft_out_size = (nperseg / 2) + 1;  // expected to be 129
     float* power_db_array = (float*)malloc(num_subwindows * fft_out_size * sizeof(float));
     if (!power_db_array) {
         fprintf(stderr, "process_buffer: Failed to allocate power_db_array\n");
         return;
     }
-
     int ret = stft_compute(stft_handle, time_data, SAMPLES_20MS, power_db_array);
     if (ret != num_subwindows) {
-        fprintf(stderr, "process_buffer: stft_compute returned %d subwindows, expected %d\n",
-                ret, num_subwindows);
+        fprintf(stderr, "process_buffer: stft_compute returned %d subwindows, expected %d\n", ret, num_subwindows);
     }
-
-    // 2) If in saving mode => write .bin
+    
+    // 2) Apply log scaling: convert the STFT power array (size: [num_subwindows x fft_out_size])
+    //    to a log-scaled spectrogram with new frequency bins (INPUT_HEIGHT, e.g., 513).
+    int new_freq_bins = INPUT_HEIGHT;  // Defined in bubble_detector.h (expected 513)
+    float* log_power_array = log_scale_spectrogram_c(power_db_array, num_subwindows, fft_out_size, new_freq_bins);
+    free(power_db_array);
+    if (!log_power_array) {
+        return;
+    }
+    
+    // Now log_power_array has dimensions [INPUT_HEIGHT x num_subwindows] (i.e. 513 x 38) in row-major order.
+    
+    // 3) If in saving mode, update metadata and write the log-scaled spectrogram.
     if (cbuf.save_to_file) {
         char filename[256];
         uint32_t time_offset_ms = frame_counter * 10;
         snprintf(filename, sizeof(filename), "%s/stft_%06u.bin", output_directory, frame_counter);
-
         FILE* fp = fopen(filename, "wb");
         if (!fp) {
             fprintf(stderr, "process_buffer: Failed to open %s\n", filename);
-            free(power_db_array);
+            free(log_power_array);
             return;
         }
-
-        // Write metadata: [SAMPLES_20MS, nperseg, noverlap, num_subwindows,
-        //                 fft_out_size, (uint32_t)(EFFECTIVE_SR), time_offset_ms]
+        // Write metadata: update fft_out_size to new_freq_bins.
+        // Meta: [SAMPLES_20MS, nperseg, noverlap, num_subwindows, new_freq_bins, effective_sr, time_offset]
         uint32_t meta[7];
         meta[0] = SAMPLES_20MS;
         meta[1] = nperseg;
         meta[2] = noverlap;
         meta[3] = num_subwindows;
-        meta[4] = fft_out_size;
+        meta[4] = new_freq_bins;  // Now 513 (log-scaled frequency bins)
         meta[5] = (uint32_t)(EFFECTIVE_SR);
         meta[6] = time_offset_ms;
         fwrite(meta, sizeof(uint32_t), 7, fp);
-
-        // Optionally store raw time-domain data
+        
+        // Optionally store raw time-domain data.
         fwrite(time_data, sizeof(float), SAMPLES_20MS, fp);
-
-        // Write STFT power array
-        fwrite(power_db_array, sizeof(float), num_subwindows * fft_out_size, fp);
-
+        
+        // Write the log-scaled STFT power array.
+        fwrite(log_power_array, sizeof(float), new_freq_bins * num_subwindows, fp);
         fclose(fp);
-        printf("Saved STFT chunk %u => %s\n", frame_counter, filename);
+        printf("Saved log-scaled STFT chunk %u => %s\n", frame_counter, filename);
     }
 #ifdef CNN_ENABLED
-    else {
-        // Otherwise => CNN detection (mode 0)
-        run_cnn_detection(power_db_array, num_subwindows, fft_out_size);
+    DetectionResult result = detector_process_frame(log_power_array);
+    if (result == DETECTION_BUBBLE) {
+        // drive all three DIO pins high
+        rp_DpinSetState(RP_DIO0_M, RP_HIGH);
+        rp_DpinSetState(RP_DIO1_M, RP_HIGH);
+        rp_DpinSetState(RP_DIO2_M, RP_HIGH);
+        // keep pulse for 500 µs then clear
+        usleep(500);
+        rp_DpinSetState(RP_DIO0_M, RP_LOW);
+        rp_DpinSetState(RP_DIO1_M, RP_LOW);
+        rp_DpinSetState(RP_DIO2_M, RP_LOW);
     }
 #endif
 
-    free(power_db_array);
+    free(log_power_array);
     frame_counter++;
 }
 
@@ -377,7 +428,17 @@ int main(int argc, char** argv) {
         fprintf(stderr, "rp_Init failed\n");
         return 1;
     }
+
+    // configure DIO0, DIO1, and DIO2 as outputs for bubble signal
     rp_AcqReset();
+    rp_DpinSetDirection(RP_DIO0_M, RP_OUT);
+    rp_DpinSetDirection(RP_DIO1_M, RP_OUT);
+    rp_DpinSetDirection(RP_DIO2_M, RP_OUT);
+
+    // start IOs low
+    rp_DpinSetState(RP_DIO0_M, RP_LOW);
+    rp_DpinSetState(RP_DIO1_M, RP_LOW);
+    rp_DpinSetState(RP_DIO2_M, RP_LOW);
 
     // Use decimation=256 => ~488 kS/s
     rp_AcqSetDecimation(DECIMATION);
