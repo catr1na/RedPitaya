@@ -288,7 +288,24 @@ void process_buffer(int index) {
     }
     
     // Now log_power_array has dimensions [INPUT_HEIGHT x num_subwindows] (i.e. 513 x 38) in row-major order.
-    
+
+    // Find the maximum value
+    float max_val = -INFINITY;
+    int total = new_freq_bins * num_subwindows;
+    for (int i = 0; i < total; i++) {
+        if (log_power_array[i] > max_val) {
+            max_val = log_power_array[i];
+        }
+    }
+    // Divide by max (if > 0) so data ends up in [0,1]
+    if (max_val > 0.0f) {
+        float inv = 1.0f / max_val;
+        for (int i = 0; i < total; i++) {
+            log_power_array[i] *= inv;
+        }
+    }
+
+
     // 3) If in saving mode, update metadata and write the log-scaled spectrogram.
     if (cbuf.save_to_file) {
         char filename[256];
@@ -321,17 +338,13 @@ void process_buffer(int index) {
         printf("Saved log-scaled STFT chunk %u => %s\n", frame_counter, filename);
     }
 #ifdef CNN_ENABLED
-    DetectionResult result = detector_process_frame(log_power_array);
-    if (result == DETECTION_BUBBLE) {
-        // drive all three DIO pins high
-        rp_DpinSetState(RP_DIO0_M, RP_HIGH);
-        rp_DpinSetState(RP_DIO1_M, RP_HIGH);
-        rp_DpinSetState(RP_DIO2_M, RP_HIGH);
-        // keep pulse for 500 µs then clear
-        usleep(500);
-        rp_DpinSetState(RP_DIO0_M, RP_LOW);
-        rp_DpinSetState(RP_DIO1_M, RP_LOW);
-        rp_DpinSetState(RP_DIO2_M, RP_LOW);
+    else {
+        // 4) In detection mode, pass the log-scaled spectrogram to the CNN.
+        //    detector_process_frame expects an array of size INPUT_HEIGHT * INPUT_WIDTH.
+        DetectionResult result = detector_process_frame(log_power_array);
+        if (result == DETECTION_BUBBLE) {
+            printf("Bubble detected at frame %u\n", frame_counter);
+        }
     }
 #endif
 
@@ -428,17 +441,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "rp_Init failed\n");
         return 1;
     }
-
-    // configure DIO0, DIO1, and DIO2 as outputs for bubble signal
     rp_AcqReset();
-    rp_DpinSetDirection(RP_DIO0_M, RP_OUT);
-    rp_DpinSetDirection(RP_DIO1_M, RP_OUT);
-    rp_DpinSetDirection(RP_DIO2_M, RP_OUT);
-
-    // start IOs low
-    rp_DpinSetState(RP_DIO0_M, RP_LOW);
-    rp_DpinSetState(RP_DIO1_M, RP_LOW);
-    rp_DpinSetState(RP_DIO2_M, RP_LOW);
 
     // Use decimation=256 => ~488 kS/s
     rp_AcqSetDecimation(DECIMATION);
