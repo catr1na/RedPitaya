@@ -5,10 +5,10 @@
 #include <stdint.h>
 
 // CNN Architecture Parameters
-#define CONV1_FILTERS 32
-#define CONV2_FILTERS 64
-#define CONV3_FILTERS 128
-#define DENSE1_UNITS 128
+#define CONV1_FILTERS 64
+#define CONV2_FILTERS 128
+#define CONV3_FILTERS 256
+#define DENSE1_UNITS 256
 #define CONV_KERNEL_SIZE 3
 #define POOL_SIZE 2
 
