@@ -1,0 +1,478 @@
+#THIS IS FOR NON REBIN DATA FROM THE RP. I DO REBIN PREPROCESSING HERE
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Dropout, Flatten
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_score, recall_score, confusion_matrix, roc_curve, auc
+
+# Import SMOTE (pip install imbalanced-learn)
+from imblearn.over_sampling import SMOTE
+
+###############################################################################
+# 1) Reading the .bin files (OLD pipeline, non–log‐scaled). Each file writes:
+#    [7×uint32 metadata] → [samples_20ms × float32 raw_time] →
+#    [num_subwindows×fft_out_size × float32 STFT power array] in time-major order.
+###############################################################################
+def load_stft_file(filename):
+    """
+    Reads a .bin file written by the OLD spectrogram_acquisition.c.
+    Metadata (uint32×7), then raw_time (float32×samples_20ms),
+    then STFT (float32×(num_subwindows*fft_out_size)) in row‐major [time×freq].
+    Returns a dict with keys:
+      'samples_20ms', 'nperseg', 'noverlap', 'num_subwindows',
+      'fft_out_size', 'effective_sr', 'time_offset',
+      'raw_time' (np.ndarray shape=(samples_20ms,)),
+      'stft'     (np.ndarray shape=(num_subwindows, fft_out_size)).
+    """
+    meta = np.fromfile(filename, dtype=np.uint32, count=7)
+    if meta.size < 7:
+        raise ValueError(f"File {filename} too short to read metadata.")
+
+    samples_20ms   = int(meta[0])
+    nperseg        = int(meta[1])
+    noverlap       = int(meta[2])
+    num_subwindows = int(meta[3])   # expected 38
+    fft_out_size   = int(meta[4])   # expected 129
+    effective_sr   = int(meta[5])
+    time_offset    = int(meta[6])
+
+    meta_bytes     = 7 * 4                 # 28 bytes
+    raw_time_bytes = samples_20ms * 4       # float32
+    stft_offset    = meta_bytes + raw_time_bytes
+
+    # Read raw time-domain (unused for CNN training, but we must advance the file pointer)
+    raw_time = np.fromfile(filename,
+                           dtype=np.float32,
+                           count=samples_20ms,
+                           offset=meta_bytes)
+    if raw_time.size < samples_20ms:
+        raise ValueError(f"File {filename} too short to read raw_time.")
+
+    # Read STFT power array shape=(num_subwindows, fft_out_size)
+    stft_data = np.fromfile(filename,
+                            dtype=np.float32,
+                            count=num_subwindows * fft_out_size,
+                            offset=stft_offset)
+    if stft_data.size < num_subwindows * fft_out_size:
+        raise ValueError(f"File {filename} too short to read STFT data.")
+    stft_data = stft_data.reshape((num_subwindows, fft_out_size))
+
+    return {
+        'samples_20ms':   samples_20ms,
+        'nperseg':        nperseg,
+        'noverlap':       noverlap,
+        'num_subwindows': num_subwindows,
+        'fft_out_size':   fft_out_size,
+        'effective_sr':   effective_sr,
+        'time_offset':    time_offset,
+        'raw_time':       raw_time,
+        'stft':           stft_data
+    }
+
+###############################################################################
+# 2) Gather all spectrograms + labels from a folder (OLD pipeline).
+#    Each spectrogram is shape=(38, 129). We return:
+#      spectrograms: np.ndarray shape=(N, 38, 129)
+#      labels:       np.ndarray shape=(N,)
+###############################################################################
+def get_spectrograms_and_labels(folder_path, bubble_files):
+    spec_list  = []
+    label_list = []
+    bin_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.bin')])
+
+    for fname in bin_files:
+        full_path = os.path.join(folder_path, fname)
+        data_dict = load_stft_file(full_path)
+        stft_data = data_dict['stft']  # shape = (38, 129)
+
+        label = 1 if fname in bubble_files else 0
+        spec_list.append(stft_data)
+        label_list.append(label)
+
+    spectrograms = np.array(spec_list)             # → (N, 38, 129)
+    labels       = np.array(label_list, dtype=np.int32)
+    return spectrograms, labels
+
+###############################################################################
+# 3) Plot training curves
+###############################################################################
+def plot_training_history(history):
+    plt.figure(figsize=(12, 4))
+    # Accuracy
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['accuracy'], label='Train Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Val Accuracy')
+    plt.title('Model Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    # Loss
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['loss'], label='Train Loss')
+    plt.plot(history.history['val_loss'], label='Val Loss')
+    plt.title('Model Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig('training_historyNEW1.png')
+    plt.close()
+
+###############################################################################
+# 4) Transpose & save Keras weights for bubble_detector.c
+###############################################################################
+def save_weights_for_c(model, output_dir):
+    """
+    Saves Keras model weights so bubble_detector.c can load them.
+    Conv2D: transpose from (kernel_row,kernel_col,in_ch,out_ch)
+            → (out_ch,kernel_row,kernel_col,in_ch)
+    Dense:  transpose from (in_dim,out_dim) → (out_dim,in_dim)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Conv1: layer index 0
+    conv1 = model.layers[0]
+    w1, b1 = conv1.get_weights()            # w1 shape=(3,3,1,64)
+    w1_t   = np.transpose(w1, (3, 0, 1, 2)) # → (64,3,3,1)
+    w1_t.tofile(os.path.join(output_dir, 'conv1_weights.bin'))
+    b1.tofile(os.path.join(output_dir, 'conv1_bias.bin'))
+
+    # Conv2: layer index 3
+    conv2 = model.layers[3]
+    w2, b2 = conv2.get_weights()            # w2 shape=(3,3,64,128)
+    w2_t   = np.transpose(w2, (3, 0, 1, 2)) # → (128,3,3,64)
+    w2_t.tofile(os.path.join(output_dir, 'conv2_weights.bin'))
+    b2.tofile(os.path.join(output_dir, 'conv2_bias.bin'))
+
+    # Conv3: layer index 6
+    conv3 = model.layers[6]
+    w3, b3 = conv3.get_weights()            # w3 shape=(3,3,128,256)
+    w3_t   = np.transpose(w3, (3, 0, 1, 2)) # → (256,3,3,128)
+    w3_t.tofile(os.path.join(output_dir, 'conv3_weights.bin'))
+    b3.tofile(os.path.join(output_dir, 'conv3_bias.bin'))
+
+    # Dense1: layer index 10
+    dense1 = model.layers[10]
+    w4, b4 = dense1.get_weights()           # w4 shape=(flattened,256)
+    w4_t   = w4.T                          # → (256,flattened)
+    w4_t.tofile(os.path.join(output_dir, 'dense1_weights.bin'))
+    b4.tofile(os.path.join(output_dir, 'dense1_bias.bin'))
+
+    # Dense2: layer index 12
+    dense2 = model.layers[12]
+    w5, b5 = dense2.get_weights()           # w5 shape=(256,2)
+    w5_t   = w5.T                          # → (2,256)
+    w5_t.tofile(os.path.join(output_dir, 'dense2_weights.bin'))
+    b5.tofile(os.path.join(output_dir, 'dense2_bias.bin'))
+
+    # Save a small text summary for reference
+    with open(os.path.join(output_dir, 'model_info.txt'), 'w') as f:
+        model.summary(print_fn=lambda line: f.write(line + '\n'))
+        f.write("\nLayer Shapes:\n")
+        f.write(f"Conv1 weights: {conv1.get_weights()[0].shape} → {w1_t.shape}\n")
+        f.write(f"Conv2 weights: {conv2.get_weights()[0].shape} → {w2_t.shape}\n")
+        f.write(f"Conv3 weights: {conv3.get_weights()[0].shape} → {w3_t.shape}\n")
+        f.write(f"Dense1 weights: {dense1.get_weights()[0].shape} → {w4_t.shape}\n")
+        f.write(f"Dense2 weights: {dense2.get_weights()[0].shape} → {w5_t.shape}\n")
+
+###############################################################################
+# 5) Log‐scale helper (129→513 frequency bins)
+###############################################################################
+def log_scale_spectrogram(spectrogram, new_num_freq_bins=513):
+    """
+    spectrogram: 2D array of shape (orig_freq_bins, num_time_steps), e.g. (129,38)
+    new_num_freq_bins: desired freq dimension, e.g. 513
+    Returns a 2D array of shape (513,38).
+    """
+    orig_num_freq_bins, num_time_steps = spectrogram.shape
+    x_old = np.arange(orig_num_freq_bins)
+    x_new = np.logspace(0, np.log10(orig_num_freq_bins - 1), new_num_freq_bins)
+    new_spec = np.zeros((new_num_freq_bins, num_time_steps), dtype=spectrogram.dtype)
+    for t in range(num_time_steps):
+        new_spec[:, t] = np.interp(x_new, x_old, spectrogram[:, t])
+    return new_spec
+
+###############################################################################
+# 6) Main training routine
+###############################################################################
+def main():
+    # 6.1) Folder containing your OLD, non–log‐scaled spectrogram .bin files
+    data_folder = '/Users/danielcampos/Desktop/CombinedTrainingData/'
+
+    # 6.2) List of filenames that contain “bubble” (label=1)
+    bubble_files = [
+        "stft_436851.bin",
+        "stft_472453.bin",
+        "stft_480039.bin",
+        "stft_489712.bin",
+        "stft_509922.bin",
+        "stft_539593.bin",
+        "stft_553732.bin",
+        "stft_553733.bin",
+        "stft_565593.bin",
+        "stft_581307.bin",
+        "stft_606454.bin",
+        "stft_636685.bin",
+        "stft_646469.bin",
+        "stft_671133.bin",
+        "stft_689650.bin",
+        "stft_698391.bin",
+        "stft_734491.bin",
+        "stft_734492.bin",
+        "stft_743329.bin",
+        "stft_776322.bin",
+        "stft_838205.bin",
+        "stft_850833.bin",
+        "stft_859606.bin",
+        "stft_869352.bin",
+        "stft_869353.bin",
+        "stft_879223.bin",
+        "stft_888666.bin",
+        "stft_888667.bin",
+        "stft_910538.bin",
+        "stft_910539.bin",
+        "stft_1044807.bin",
+        "stft_1044808.bin",
+        "stft_1072303.bin",
+        "stft_1086451.bin",
+        "stft_1109856.bin",
+        "stft_1109857.bin",
+        "stft_1216826.bin",
+        "stft_1216827.bin",
+        "stft_1242322.bin",
+        "stft_1259305.bin",
+        "stft_1259306.bin",
+        "stft_1272396.bin",
+        "stft_1272397.bin",
+        "stft_1289728.bin",
+        "stft_1289729.bin",
+        "stft_1313179.bin",
+        "stft_1313180.bin",
+        "stft_1348371.bin",
+        "stft_1377342.bin",
+        "stft_1377343.bin",
+        "stft_1422123.bin",
+        "stft_1422124.bin",
+        "stft_1435531.bin",
+        "stft_1435532.bin",
+        "stft_1463687.bin",
+        "stft_1463688.bin",
+        "stft_1496675.bin",
+        "stft_1517557.bin",
+        "stft_1517558.bin",
+        "stft_1525196.bin",
+        "stft_1540053.bin",
+        "stft_1548748.bin",
+        "stft_1564438.bin",
+        "stft_1590565.bin",
+        "stft_1601066.bin",
+        "stft_1601067.bin",
+        "stft_1613430.bin",
+        "stft_1613431.bin",
+        "stft_1621451.bin",
+        "stft_1621452.bin",
+        "stft_1706510.bin",
+        "stft_1706511.bin",
+        "stft_1727662.bin",
+        "stft_1742283.bin",
+        "stft_1742284.bin",
+        "stft_1763324.bin",
+        "stft_1804621.bin",
+        "stft_1804622.bin",
+        "stft_1828362.bin",
+        "stft_1828363.bin",
+        "stft_1839805.bin",
+        "stft_1839806.bin",
+        "stft_1855476.bin",
+        "stft_1855477.bin",
+        "stft_1877592.bin",
+        "stft_1877593.bin",
+        "stft_1890728.bin",
+        "stft_1890729.bin",
+        "stft_1941875.bin",
+        "stft_1941876.bin",
+        "stft_1963675.bin",
+        "stft_1971793.bin",
+        "stft_1971794.bin",
+        "stft_2026020.bin",
+        "stft_2035599.bin",
+        "stft_2050312.bin",
+        "stft_2050313.bin",
+        "stft_2080193.bin",
+        "stft_2091291.bin"
+    ]
+
+    print(f"Loading spectrogram data from '{data_folder}' (OLD pipeline)…")
+    spectrograms, labels = get_spectrograms_and_labels(data_folder, bubble_files)
+    # spectrograms.shape == (130064, 38, 129)
+    print(f"Found {len(spectrograms)} spectrograms")
+    print(f"Spectrogram array shape: {spectrograms.shape}")
+
+    # 6.3) Sub‐sample background (keep 1/20th of non‐bubble)
+    np.random.seed(42)
+    bubble_indices     = np.where(labels == 1)[0]
+    background_indices = np.where(labels == 0)[0]
+    selected_background = np.random.choice(background_indices,
+                                           size=len(background_indices)//20,
+                                           replace=False)
+    keep_indices = np.sort(np.concatenate((bubble_indices, selected_background)))
+    spectrograms = spectrograms[keep_indices]
+    labels       = labels[keep_indices]
+    print(f"After sub‐sampling, {len(spectrograms)} spectrograms remain")
+
+    # 6.4) Perform LOG‐SCALING on each (38,129) → (38,513), then transpose to (513,38)
+    N, time_steps, orig_freq_bins = spectrograms.shape  # (e.g. 6595,38,129)
+    new_freq_bins = 513
+
+    # Allocate a brand‐new array of shape (N, 513, 38)
+    log_specs = np.zeros((N, new_freq_bins, time_steps), dtype=np.float32)
+
+    for i in range(N):
+        spec = spectrograms[i]           # shape = (38, 129)
+        spec_T = spec.T                  # shape = (129, 38)
+        spec_log = log_scale_spectrogram(spec_T, new_num_freq_bins=new_freq_bins)
+        # spec_log is now (513, 38)    → store directly into log_specs[i]
+        log_specs[i] = spec_log         # shape = (513,38)
+
+    # Now each example is (513, 38) in freq×time order
+    spectrograms = log_specs  # new shape = (N, 513, 38)
+
+    # 6.5) Add channel dimension → (N, 513, 38, 1)
+    spectrograms = spectrograms[..., np.newaxis]
+
+    # 6.6) Per‐spectrogram normalization (divide by that example’s own max)
+    for i in range(len(spectrograms)):
+        peak = spectrograms[i].max()
+        if peak > 0:
+            spectrograms[i] /= peak
+    print("Applied per‐spectrogram normalization (each divided by its own max).")
+
+    # 6.7) Train/Val/Test split (stratified by label)
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        spectrograms, labels,
+        test_size=0.15, random_state=42, stratify=labels
+    )
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp, y_temp,
+        test_size=0.30, random_state=42, stratify=y_temp
+    )
+    print("Data splits:")
+    print(f"  Training:   {len(X_train)} samples")
+    print(f"  Validation: {len(X_val)} samples")
+    print(f"  Test:       {len(X_test)} samples")
+
+    # 6.8) SMOTE on the training set
+    num_train, H, W, C = X_train.shape  # (num_train, 513, 38, 1)
+    X_train_flat = X_train.reshape(num_train, -1)
+
+    smote = SMOTE(random_state=42)
+    X_train_res, y_train_res = smote.fit_resample(X_train_flat, y_train)
+
+    # Reshape back → (num_resampled, 513, 38, 1)
+    X_train_res = X_train_res.reshape(-1, H, W, C)
+
+    # One‐hot encode
+    y_train_res = to_categorical(y_train_res, num_classes=2)
+    y_val = to_categorical(y_val, num_classes=2)
+    y_test = to_categorical(y_test, num_classes=2)
+    print(f"After SMOTE, training samples = {X_train_res.shape[0]}")
+
+    # 6.9) Build the CNN
+    # Input shape must be (freq_bins=513, time_steps=38, channels=1)
+    model = Sequential([
+        Conv2D(64, (3, 3), activation='relu',
+               input_shape=(513, 38, 1)),
+        MaxPooling2D((2, 2)),
+        Dropout(0.2),
+
+        Conv2D(128, (3, 3), activation='relu'),
+        MaxPooling2D((2, 2)),
+        Dropout(0.3),
+
+        Conv2D(256, (3, 3), activation='relu'),
+        MaxPooling2D((2, 2)),
+        Dropout(0.4),
+
+        Flatten(),
+        Dense(256, activation='relu'),
+        Dropout(0.5),
+        Dense(2, activation='softmax')
+    ])
+
+    model.compile(
+        optimizer='adam',
+        loss='categorical_crossentropy',
+        metrics=['accuracy']
+    )
+    model.summary()
+
+    # 6.10) Early stopping
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=10,
+        restore_best_weights=True
+    )
+
+    print("Starting training…")
+    history = model.fit(
+        X_train_res, y_train_res,
+        epochs=50,
+        batch_size=16,
+        validation_data=(X_val, y_val),
+        callbacks=[early_stopping]
+    )
+
+    plot_training_history(history)
+
+    # 6.11) Final evaluation on test set
+    test_loss, test_acc = model.evaluate(X_test, y_test)
+    print(f"Test accuracy: {test_acc:.4f}")
+
+    # 6.12) Metrics at a high decision threshold (e.g. 0.90)
+    y_test_labels = np.argmax(y_test, axis=1)
+    y_pred_prob  = model.predict(X_test)
+    threshold    = 0.90
+    y_pred       = (y_pred_prob[:, 1] > threshold).astype(int)
+
+    precision = precision_score(y_test_labels, y_pred)
+    recall    = recall_score(y_test_labels, y_pred)
+    tn, fp, fn, tp = confusion_matrix(y_test_labels, y_pred).ravel()
+    false_positive_rate = fp / (fp + tn) if (fp + tn) > 0 else 0
+
+    print(f"\nEvaluation Metrics (Threshold = {threshold}):")
+    print(f"  Precision (Bubble): {precision:.4f}")
+    print(f"  Trigger Efficiency (Recall): {recall:.4f}")
+    print(f"  False Positive Rate: {false_positive_rate:.4f}")
+
+    # 6.13) Plot ROC
+    fpr, tpr, _ = roc_curve(y_test_labels, y_pred_prob[:, 1])
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure()
+    plt.plot(fpr, tpr, label=f'ROC curve (AUC = {roc_auc:.4f})')
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic')
+    plt.legend(loc='lower right')
+    plt.savefig('roc_curveNEW1.png')
+    plt.close()
+    print("ROC curve saved as 'roc_curveNEW1.png'")
+
+    # 6.14) Save the full Python model
+    model.save('bubble_detector_modelNEW1.h5')
+    print("Saved model to 'bubble_detector_modelNEW1.h5'")
+
+    # 6.15) Save weights for the C pipeline
+    save_weights_for_c(model, 'NEW1')
+    print("Saved C‐compatible weights in folder 'NEW1'")
+
+if __name__ == "__main__":
+    main()
