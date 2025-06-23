@@ -1,3 +1,5 @@
+#THIS IS FOR OLD LOG NON REBINNED DATE. THIS HAS REBINNING PREPROCESSING
+
 import numpy as np
 import matplotlib.pyplot as plt
 
