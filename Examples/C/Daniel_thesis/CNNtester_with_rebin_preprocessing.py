@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+#THIS IS FOR NON REBIN DATA FROM THE RP. I DO REBIN PREPROCESSING HERE
+
 """
 Inference script for Bubble vs. Background Classification (using old, non‐log‐scaled .bin files).
 
