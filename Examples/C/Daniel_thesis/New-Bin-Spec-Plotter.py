@@ -1,3 +1,5 @@
+#THIS IS FOR NEW LOG REBINNED DATA
+
 import numpy as np
 import matplotlib.pyplot as plt
 import os
