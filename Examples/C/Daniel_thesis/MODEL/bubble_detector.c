@@ -29,6 +29,12 @@ typedef struct {
     // Dense Layer 2 (Output Layer)
     float* dense2_weights; // [2, DENSE1_UNITS]
     float* dense2_bias;    // [2]
+
+    // output from conv2d calls
+    float* conv2d_output_1;
+    float* conv2d_output_2;
+    float* conv2d_output_3;
+
 } CNNModel;
 
 static CNNModel model = {0};
@@ -207,6 +213,13 @@ bool detector_init(const char* weights_dir) {
     free(filepath);
     if (!model.dense2_bias) return false;
 
+    // pre-allocate the conv2d output arrays
+    // uncomment the following lines once you've got
+    // the arguments for the calloc calls figured out
+    // model.conv2d_output_1 = (float*)calloc();
+    // model.conv2d_output_2 = (float*)calloc();
+    // model.conv2d_output_3 = (float*)calloc();
+    
     is_initialized = 1;
     return true;
 }
@@ -214,12 +227,12 @@ bool detector_init(const char* weights_dir) {
 //---------------------------------------------------------------------
 // CNN forward-pass helper functions
 //---------------------------------------------------------------------
-static float* conv2d_forward(const float* input, int in_h, int in_w, int in_c,
+void conv2d_forward(const float* output, const float* input, int in_h, int in_w, int in_c,
                               const float* weights, const float* bias,
                               int kernel_size, int num_filters) {
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
-    float* output = (float*)calloc(out_h * out_w * num_filters, sizeof(float));
+    // float* output = (float*)calloc(out_h * out_w * num_filters, sizeof(float));
     if (!output) {
         fprintf(stderr, "Failed to allocate memory for conv2d output.\n");
         return NULL;
@@ -323,9 +336,10 @@ static float* forward_pass(const float* spectrogram) {
     int c = 1; // Initial input channels
 
     // Layer 1: Conv2D + ReLU
-    float* conv1_out = conv2d_forward(current_input, h, w, c,
-                                      model.conv1_weights, model.conv1_bias,
-                                      CONV_KERNEL_SIZE, CONV1_FILTERS);
+    float* conv1_out = model.conv2d_output_1;
+    conv2d_forward(conv1_out, current_input, h, w, c,
+                   model.conv1_weights, model.conv1_bias,
+                   CONV_KERNEL_SIZE, CONV1_FILTERS);
     if (!conv1_out) return NULL;
     h = h - CONV_KERNEL_SIZE + 1; // Update height
     w = w - CONV_KERNEL_SIZE + 1; // Update width
@@ -333,16 +347,17 @@ static float* forward_pass(const float* spectrogram) {
 
     // Layer 2: MaxPooling2D
     float* pool1_out = max_pool2d_forward(conv1_out, h, w, c, POOL_SIZE);
-    free(conv1_out);
+    // free(conv1_out);
     if (!pool1_out) return NULL;
     h /= POOL_SIZE; // Update height
     w /= POOL_SIZE; // Update width
     // 'c' (channels) remains CONV1_FILTERS
 
     // Layer 3: Conv2D + ReLU
-    float* conv2_out = conv2d_forward(pool1_out, h, w, c, // 'c' is CONV1_FILTERS
-                                      model.conv2_weights, model.conv2_bias,
-                                      CONV_KERNEL_SIZE, CONV2_FILTERS);
+    float* conv2_out = model.conv2d_output_2;
+    conv2d_forward(conv2_out, pool1_out, h, w, c, // 'c' is CONV1_FILTERS
+                   model.conv2_weights, model.conv2_bias,
+                   CONV_KERNEL_SIZE, CONV2_FILTERS);
     free(pool1_out);
     if (!conv2_out) return NULL;
     h = h - CONV_KERNEL_SIZE + 1;
@@ -351,16 +366,17 @@ static float* forward_pass(const float* spectrogram) {
 
     // Layer 4: MaxPooling2D
     float* pool2_out = max_pool2d_forward(conv2_out, h, w, c, POOL_SIZE);
-    free(conv2_out);
+    // free(conv2_out);
     if (!pool2_out) return NULL;
     h /= POOL_SIZE;
     w /= POOL_SIZE;
     // 'c' (channels) remains CONV2_FILTERS
 
     // Layer 5: Conv2D + ReLU
-    float* conv3_out = conv2d_forward(pool2_out, h, w, c, // 'c' is CONV2_FILTERS
-                                      model.conv3_weights, model.conv3_bias,
-                                      CONV_KERNEL_SIZE, CONV3_FILTERS);
+    float* conv3_out = model.conv2d_output_3;
+    conv2d_forward(conv3_out, pool2_out, h, w, c, // 'c' is CONV2_FILTERS
+                   model.conv3_weights, model.conv3_bias,
+                   CONV_KERNEL_SIZE, CONV3_FILTERS);
     free(pool2_out);
     if (!conv3_out) return NULL;
     h = h - CONV_KERNEL_SIZE + 1;
@@ -369,7 +385,7 @@ static float* forward_pass(const float* spectrogram) {
 
     // Layer 6: MaxPooling2D
     float* pool3_out = max_pool2d_forward(conv3_out, h, w, c, POOL_SIZE);
-    free(conv3_out);
+    // free(conv3_out);
     if (!pool3_out) return NULL;
     h /= POOL_SIZE; // h should now be 62
     w /= POOL_SIZE; // w should now be 3
@@ -437,6 +453,9 @@ void detector_cleanup(void) {
     free(model.dense1_bias);   model.dense1_bias = NULL;
     free(model.dense2_weights);model.dense2_weights = NULL;
     free(model.dense2_bias);   model.dense2_bias = NULL;
+    free(model.conv2d_output_1); model.conv2d_output_1 = NULL;
+    free(model.conv2d_output_2); model.conv2d_output_2 = NULL;
+    free(model.conv2d_output_3); model.conv2d_output_3 = NULL;
     memset(&model, 0, sizeof(CNNModel));
     is_initialized = 0;
 }
