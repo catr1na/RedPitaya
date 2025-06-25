@@ -271,9 +271,17 @@ bool detector_init(const char* weights_dir) {
 //---------------------------------------------------------------------
 // CNN forward-pass helper functions
 //---------------------------------------------------------------------
-static void conv2d_forward(float* output, const float* input, int in_h, int in_w, int in_c,
-                              const float* weights, const float* bias,
-                              int kernel_size, int num_filters)
+static void conv2d_forward(
+    float const *input,
+    int in_h,
+    int in_w,
+    int in_c,
+    const float *weights,
+    const float* bias,
+    int kernel_size,
+    int num_filters,
+    float *output
+);
 {
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
@@ -343,10 +351,16 @@ static void max_pool2d_forward(const float* input, int in_h, int in_w, int in_c,
     }
 }
 
-static void dense_forward(const float* input, int input_size,
-                            const float* weights, const float* bias,
-                            int output_size, bool apply_relu, float* output) 
-{ // Added apply_relu flag
+static void dense_forward(
+    const float* input, 
+    int input_size,
+    const float* weights,
+    const float* bias,
+    int output_size,
+    bool apply_relu,
+    float* output
+) {
+ // Added apply_relu flag
     //float* output = (float*)malloc(output_size, sizeof(float));
     //if (!output) {
        // fprintf(stderr, "Failed to allocate memory for dense_forward output.\n");
@@ -362,14 +376,13 @@ static void dense_forward(const float* input, int input_size,
         output[o] = apply_relu ? relu(sum) : sum;
         } //else {
             //output[o] = sum;
-        }
     }
 }
 
 //---------------------------------------------------------------------
 // Forward pass through the CNN
 //---------------------------------------------------------------------
-static float* forward_pass(const float* spectrogram) {
+static float* forward_pass(float* spectrogram) {
     int h = INPUT_HEIGHT, w = INPUT_WIDTH, c = 1;
     // Assume spectrogram is a flattened array with shape [INPUT_HEIGHT * INPUT_WIDTH], representing 1 channel input
     // Layer dimensions will be taken from bubble_detector.h constants
@@ -399,36 +412,66 @@ static float* forward_pass(const float* spectrogram) {
     // 'c' (channels) remains CONV1_FILTERS
 
     // Layer 2:
-    conv2d_forward(model.pool_output_1, h, w, c,
-        model.conv2_weights, model.conv2_bias
-        model.conv2d_output_2);
-    h = h - CONV_KERNEL_SIZE + 1; w = w - CONV_KERNEL_SIZE + 1; c = CONV2_FILTERS;
+    // Layer 2: conv → pool
+    conv2d_forward(
+        model.conv2d_output_2,    // 1️⃣ output buffer
+        model.pool_output_1,      // 2️⃣ input buffer
+        h,                        // 3️⃣ in_h
+        w,                        // 4️⃣ in_w
+        c,                        // 5️⃣ in_c
+        model.conv2_weights,      // 6️⃣ weights
+        model.conv2_bias,         // 7️⃣ bias
+        CONV_KERNEL_SIZE,         // 8️⃣ kernel_size
+        CONV2_FILTERS             // 9️⃣ num_filters
+    );
 
-    max_pool2d_forward(model.conv2d_output_2, h, w, c, POOL_SIZE, model.pool_output_2);
-    h /= POOL_SIZE; w /= POOL_SIZE;
+// update spatial dims & channels
+    h = h - CONV_KERNEL_SIZE + 1;
+    w = w - CONV_KERNEL_SIZE + 1;
+    c = CONV2_FILTERS;
 
-    //LAYER 3:
-    
-    conv2d_forward(model.pool_output_2, h, w, c,
-                 model.conv3_weights, model.conv3_bias,
-                 CONV_KERNEL_SIZE, CONV3_FILTERS,
-                 model.conv2d_output_3);
-    h = h - CONV_KERNEL_SIZE + 1; w = w - CONV_KERNEL_SIZE + 1; c = CONV3_FILTERS;
-
-    max_pool2d_forward(model.conv2d_output_3, h, w, c, POOL_SIZE, model.pool_output_3);
-    h /= POOL_SIZE; w /= POOL_SIZE;
-
-    // Layer 4: MaxPooling2D
-    // free(conv2_out);
-   // if (!pool2_out) return NULL;
-   // h /= POOL_SIZE;
-   // w /= POOL_SIZE;
-    // 'c' (channels) remains CONV2_FILTERS
+// now max‐pool
     max_pool2d_forward(
-        model.conv2d_output_2
+        model.conv2d_output_2,    // 2️⃣ input buffer
+        h,                        // 3️⃣ in_h
+        w,                        // 4️⃣ in_w
+        c,                        // 5️⃣ in_c
+        POOL_SIZE,                // 6️⃣ pool_size
+        model.pool_output_2       // 7️⃣ output ptr
+    );
+    h /= POOL_SIZE;
+    w /= POOL_SIZE;
+ //LAYER 3:
+    
+    conv2d_forward(
+        model.conv2d_output_3,
+        model.pool_output_2,
+        h, w, c,
+        model.conv3_weights,
+        model.conv3_bias,
+        CONV_KERNEL_SIZE,
+        CONV3_FILTERS,
+    );
+    h = h - CONV_KERNEL_SIZE + 1;
+    w = w - CONV_KERNEL_SIZE + 1;
+    c = CONV3_FILTERS;
+
+    max_pool2d_forward(
+        model.conv2d_output_3,
         h, w, c,
         POOL_SIZE,
-        model.pool_output_2
+        model.pool_output_3
+    );
+    h /= POOL_SIZE;
+    w /= POOL_SIZE;
+
+    // Layer 4: MaxPooling2D
+    // 'c' (channels) remains CONV3_FILTERS
+    max_pool2d_forward(
+        model.conv2d_output_4,
+        h, w, c,
+        POOL_SIZE,
+        model.pool_output_3
     );
     h /= POOL_SIZE;
     w /= POOL_SIZE;
@@ -436,15 +479,16 @@ static float* forward_pass(const float* spectrogram) {
     // Layer 5: Conv2D + ReLU
    // float* conv3_out = model.conv2d_output_3;
     conv2d_forward(
-        model.pool_output_2,
+        model.conv2d_output_5,
+        model.pool_outtput_4,
         h, w, c,
-        model.conv3_weights, model.conv3_bias,
+        model.conv5_weights, model.conv5_bias,
         CONV_KERNEL_SIZE, CONV3_FILTERS,
         model.conv2d_output_3
     );
     h = h - CONV_KERNEL_SIZE + 1;
     w = w - CONV_KERNEL_SIZE + 1;
-    c = CONV3_FILTERS;
+    c = CONV5_FILTERS;
     
     //conv3_out, pool2_out, h, w, c, // 'c' is CONV2_FILTERS
                  //  model.conv3_weights, model.conv3_bias,
@@ -460,10 +504,10 @@ static float* forward_pass(const float* spectrogram) {
     //w /= POOL_SIZE; // w should now be 3
     // 'c' (channels) remains CONV3_FILTERS
     max_pool2d_forward(
-        model.conv2d_output_3,
+        model.conv2d_output_6,
         h, w, c,
         POOL_SIZE,
-        model.pool_output_3
+        model.pool_output_5
     );
     h /= POOL_SIZE;
     w /= POOL_SIZE;
