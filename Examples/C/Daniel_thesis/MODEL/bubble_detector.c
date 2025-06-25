@@ -187,6 +187,18 @@ bool detector_init(const char* weights_dir) {
     // If CONV3_FILTERS is 256 (as per corrected .h file):
     // flattened_size = 62 * 3 * 256 = 47616. This matches model_info.txt.
 
+    model.conv2d_output_1 = malloc(sizeof(float) * INPUT_HEIGHT);
+    model.pool_output_1  = malloc(sizeof(float) * POOL_SIZE);
+
+    model.conv2d_output_2 = malloc(sizeof(float) * INPUT_HEIGHT);
+    model.pool_output_2  = malloc(sizeof(float) * POOL_SIZE);
+
+    model.conv2d_output_3 = malloc(sizeof(float) * INPUT_HEIGHT);
+    model.pool_output_3  = malloc(sizeof(float) * POOL_SIZE);
+
+    model.dense_output_1 = malloc(sizeof(float) * DENSE1_UNITS);
+    model.dense_output_2 = malloc(sizeof(float) * 2);
+    
     // Load Dense1 weights and bias
     filepath = build_filepath(weights_dir, "dense1_weights.bin");
     if (!filepath) return false;
@@ -215,10 +227,20 @@ bool detector_init(const char* weights_dir) {
 
     // pre-allocate the conv2d output arrays
     // uncomment the following lines once you've got
-    // the arguments for the calloc calls figured out
-    // model.conv2d_output_1 = (float*)calloc();
-    // model.conv2d_output_2 = (float*)calloc();
-    // model.conv2d_output_3 = (float*)calloc();
+    // the arguments for the malloc calls figured out
+    model.conv2d_output_1 = (float*)malloc();
+    model.conv2d_output_2 = (float*)malloc();
+    model.conv2d_output_3 = (float*)malloc();
+
+      // 3) Check for allocation failure
+    if (!model.conv2d_output_1 || !model.pool_output_1  ||
+        !model.conv2d_output_2 || !model.pool_output_2  ||
+        !model.conv2d_output_3 || !model.pool_output_3  ||
+        !model.dense_output_1 || !model.dense_output_2) {
+        fprintf(stderr, "Failed to alloc CNN buffers\n");
+        // free any non-NULL pointers here before returning…
+        return false;
+    }
     
     is_initialized = 1;
     return true;
@@ -232,7 +254,7 @@ void conv2d_forward(const float* output, const float* input, int in_h, int in_w,
                               int kernel_size, int num_filters) {
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
-    // float* output = (float*)calloc(out_h * out_w * num_filters, sizeof(float));
+    // float* output = (float*)malloc(out_h * out_w * num_filters, sizeof(float));
     if (!output) {
         fprintf(stderr, "Failed to allocate memory for conv2d output.\n");
         return NULL;
@@ -269,7 +291,7 @@ static float* max_pool2d_forward(const float* input, int in_h, int in_w, int in_
     // Assuming stride = pool_size for non-overlapping pooling
     int out_h = in_h / pool_size;
     int out_w = in_w / pool_size;
-    float* output = (float*)calloc(out_h * out_w * in_c, sizeof(float));
+    float* output = (float*)malloc(out_h * out_w * in_c, sizeof(float));
     if (!output) {
         fprintf(stderr, "Failed to allocate memory for max_pool2d output.\n");
         return NULL;
@@ -302,7 +324,7 @@ static float* max_pool2d_forward(const float* input, int in_h, int in_w, int in_
 static float* dense_forward(const float* input, int input_size,
                             const float* weights, const float* bias,
                             int output_size, bool apply_relu) { // Added apply_relu flag
-    float* output = (float*)calloc(output_size, sizeof(float));
+    float* output = (float*)malloc(output_size, sizeof(float));
     if (!output) {
         fprintf(stderr, "Failed to allocate memory for dense_forward output.\n");
         return NULL;
