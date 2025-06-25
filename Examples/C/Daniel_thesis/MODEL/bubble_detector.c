@@ -272,7 +272,8 @@ bool detector_init(const char* weights_dir) {
 // CNN forward-pass helper functions
 //---------------------------------------------------------------------
 static void conv2d_forward(
-    float const *input,
+    float *output
+    const float *input,
     int in_h,
     int in_w,
     int in_c,
@@ -280,8 +281,7 @@ static void conv2d_forward(
     const float* bias,
     int kernel_size,
     int num_filters,
-    float *output
-);
+)
 {
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
@@ -312,8 +312,7 @@ static void conv2d_forward(
                 output[i * out_w * num_filters + j * num_filters + f] = relu(sum); // Apply ReLU
             }
         }
-    }
-    //DC: return output;
+    } //return output?
 }
 
 static void max_pool2d_forward(const float* input, int in_h, int in_w, int in_c,
@@ -414,7 +413,6 @@ static float* forward_pass(float* spectrogram) {
     // Layer 2:
     // Layer 2: conv → pool
     conv2d_forward(
-        model.conv2d_output_2,    // 1️⃣ output buffer
         model.pool_output_1,      // 2️⃣ input buffer
         h,                        // 3️⃣ in_h
         w,                        // 4️⃣ in_w
@@ -423,6 +421,8 @@ static float* forward_pass(float* spectrogram) {
         model.conv2_bias,         // 7️⃣ bias
         CONV_KERNEL_SIZE,         // 8️⃣ kernel_size
         CONV2_FILTERS             // 9️⃣ num_filters
+        model.conv2d_output_2,    // 1️⃣ output buffer
+
     );
 
 // update spatial dims & channels
