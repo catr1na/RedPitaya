@@ -272,7 +272,7 @@ bool detector_init(const char* weights_dir) {
 // CNN forward-pass helper functions
 //---------------------------------------------------------------------
 static void conv2d_forward(
-    float *output
+    float *output,
     const float *input,
     int in_h,
     int in_w,
@@ -280,18 +280,10 @@ static void conv2d_forward(
     const float *weights,
     const float* bias,
     int kernel_size,
-    int num_filters,
-)
-{
+    int num_filters
+) {
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
-    // DC: float* output = (float*)malloc(out_h * out_w * num_filters, sizeof(float));
-   // DC: if (!output) {
-       //  DC: fprintf(stderr, "Failed to allocate memory for conv2d output.\n");
-        // DC: return NULL;
-   // DC: }
-    // Weight layout: [filter_out, kernel_h, kernel_w, filter_in]
-    // Input/Output layout: HWC (Height, Width, Channels)
     for (int f = 0; f < num_filters; f++) {        // Output filter
         for (int i = 0; i < out_h; i++) {          // Output height
             for (int j = 0; j < out_w; j++) {      // Output width
