@@ -317,7 +317,7 @@ static void max_pool2d_forward(const float* input, int in_h, int in_w, int in_c,
     //DC: if (!output) {
         //DC: fprintf(stderr, "Failed to allocate memory for max_pool2d output.\n");
         //return NULL;
-    //}
+    }
     for (int c = 0; c < in_c; c++) {
         for (int i = 0; i < out_h; i++) {
             for (int j = 0; j < out_w; j++) {
