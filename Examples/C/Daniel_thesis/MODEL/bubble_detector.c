@@ -317,7 +317,6 @@ static void max_pool2d_forward(const float* input, int in_h, int in_w, int in_c,
     //DC: if (!output) {
         //DC: fprintf(stderr, "Failed to allocate memory for max_pool2d output.\n");
         //return NULL;
-    }
     for (int c = 0; c < in_c; c++) {
         for (int i = 0; i < out_h; i++) {
             for (int j = 0; j < out_w; j++) {
@@ -369,6 +368,8 @@ static void dense_forward(
             //output[o] = sum;
     }
 
+}
+
 //---------------------------------------------------------------------
 // Forward pass through the CNN
 //---------------------------------------------------------------------
@@ -411,8 +412,8 @@ static float* forward_pass(float* spectrogram) {
         model.conv2_weights,      // 6️⃣ weights
         model.conv2_bias,         // 7️⃣ bias
         CONV_KERNEL_SIZE,         // 8️⃣ kernel_size
-        CONV2_FILTERS             // 9️⃣ num_filters
-        model.conv2d_output_2,    // 1️⃣ output buffer
+        CONV2_FILTERS,             // 9️⃣ num_filters
+        model.conv2d_output_2    // 1️⃣ output buffer
 
     );
 
