@@ -368,7 +368,6 @@ static void dense_forward(
         } //else {
             //output[o] = sum;
     }
-}
 
 //---------------------------------------------------------------------
 // Forward pass through the CNN
