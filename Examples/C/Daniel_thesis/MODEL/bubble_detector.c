@@ -196,7 +196,7 @@ bool detector_init(const char* weights_dir) {
     //stage 1
     int h1 = INPUT_HEIGHT - CONV_KERNEL_SIZE + 1;
     int w1 = INPUT_WIDTH - CONV_KERNEL_SIZE + 1;
-    int c1 = CONV1_FILTERS
+    int c1 = CONV1_FILTERS;
     int ph1 = h1 / POOL_SIZE, pw1 = w1 / POOL_SIZE;
 
     // stage 2
@@ -209,9 +209,9 @@ bool detector_init(const char* weights_dir) {
     int h3 = ph2 - CONV_KERNEL_SIZE + 1;
     int w3 = pw2 - CONV_KERNEL_SIZE + 1;
     int c3 = CONV3_FILTERS;
-    int ph3 = h3 / POOL_SIZE, pw3 = w3 / POOL_SIZE
+    int ph3 = h3 / POOL_SIZE, pw3 = w3 / POOL_SIZE;
 
-    int flattened_size = ph3 * pw3 * c3
+    int flattened_size = ph3 * pw3 * c3;
         
 
 
@@ -242,7 +242,7 @@ bool detector_init(const char* weights_dir) {
     free(filepath);
     if (!model.dense2_bias) return false;
 
-   model.conv2d_output_1 = malloc(sizeof(float) * h1 * w1 * c1;
+    model.conv2d_output_1 = malloc(sizeof(float) * h1 * w1 * c1);
     model.pool_output_1  = malloc(sizeof(float) * ph1 * pw1 * c1);
 
     model.conv2d_output_2 = malloc(sizeof(float) * h2 * w2 * c2);
@@ -271,9 +271,9 @@ bool detector_init(const char* weights_dir) {
 //---------------------------------------------------------------------
 // CNN forward-pass helper functions
 //---------------------------------------------------------------------
-static void conv2d_forward(const float* output, const float* input, int in_h, int in_w, int in_c,
+static void conv2d_forward(float* output, const float* input, int in_h, int in_w, int in_c,
                               const float* weights, const float* bias,
-                              int kernel_size, int num_filters, float* output) 
+                              int kernel_size, int num_filters)
 {
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
@@ -312,35 +312,35 @@ static void max_pool2d_forward(const float* input, int in_h, int in_w, int in_c,
                                  int pool_size, float*output)
 {
     // Assuming stride = pool_size for non-overlapping pooling
-    int out_h = in_h / pool_size, int out_w = in_w / pool_size;
+    int out_h = in_h / pool_size;
+    int out_w = in_w / pool_size;
     //DC: float* output = (float*)malloc(out_h * out_w * in_c, sizeof(float));
     //DC: if (!output) {
         //DC: fprintf(stderr, "Failed to allocate memory for max_pool2d output.\n");
         //return NULL;
     //}
-        for (int c = 0; c < in_c; c++) { // For each channel
-            for (int i = 0; i < out_h; i++) { // Output height
-                for (int j = 0; j < out_w; j++) { // Output width
+    for (int c = 0; c < in_c; c++) {
+        for (int i = 0; i < out_h; i++) {
+            for (int j = 0; j < out_w; j++) {
                 float max_val = -INFINITY;
-                    for (int pi = 0; pi < pool_size; pi++) { // Pool window height
-                        for (int pj = 0; pj < pool_size; pj++) { // Pool window width
-                            int in_i = i * pool_size + pi;
-                            int in_j = j * pool_size + pj;
-                        // Boundary checks for safety, though with stride=pool_size and out_h/w derived by division,
-                        // in_i and in_j should stay within bounds of in_h and in_w.
-                        //if (in_i < in_h && in_j < in_w) {
-                         //  int in_idx = in_i * in_w * in_c + in_j * in_c + c;
-                           //if (input[in_idx] > max_val) {
-                              // max_val = input[in_idx];
-                           }
-                        }
+                for (int pi = 0; pi < pool_size; pi++) {
+                    for (int pj = 0; pj < pool_size; pj++) {
+                    int in_i = i * pool_size + pi;
+                    int in_j = j * pool_size + pj;
+
+                    // compute input index (assuming channel-last)
+                    int in_idx = (in_i * in_w + in_j) * in_c + c;
+                    if (input[in_idx] > max_val) {
+                        max_val = input[in_idx];
                     }
                 }
-                output[i * out_w + j)* in_c + c] = max_val;
             }
+
+            // compute output index (channel-last)
+            int out_idx = (i * out_w + j) * in_c + c;
+            output[out_idx] = max_val;
         }
     }
-   // return output;
 }
 
 static void dense_forward(const float* input, int input_size,
@@ -364,7 +364,6 @@ static void dense_forward(const float* input, int input_size,
             //output[o] = sum;
         }
     }
-    //return output;
 }
 
 //---------------------------------------------------------------------
@@ -460,7 +459,7 @@ static float* forward_pass(const float* spectrogram) {
     //h /= POOL_SIZE; // h should now be 62
     //w /= POOL_SIZE; // w should now be 3
     // 'c' (channels) remains CONV3_FILTERS
-    max_pool_2d_forward(
+    max_pool2d_forward(
         model.conv2d_output_3,
         h, w, c,
         POOL_SIZE,
@@ -485,7 +484,7 @@ static float* forward_pass(const float* spectrogram) {
    // if (!dense1_out) return NULL;
 
     // Layer 9: Dense (Output Layer, no ReLU here, Softmax applied later)
-    dense_forward(model.dense1_output_1, DENSE1_UNITS, model.dense2_weights, 
+    dense_forward(model.dense_output_1, DENSE1_UNITS, model.dense2_weights, 
         model.dense2_bias, 2, false, model.dense_output_2); // No ReLU for output layer before Softmax
 //    free(dense1_out);
   //  if (!dense2_out) return NULL;
@@ -555,4 +554,4 @@ DetectionResult detector_process_frame(float* spectrogram) {
 
 }
 
-//#endif // CNN_ENABLED
+#endif // CNN_ENABLED
