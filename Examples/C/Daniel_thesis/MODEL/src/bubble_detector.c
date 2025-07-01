@@ -453,10 +453,9 @@ model.pool_output_3);
 
     timings->total_time = ((double)(clock() - total_start)) / CLOCKS_PER_SEC;
     
-    printf("DEBUG: Forward pass completed\n");
-    {
-    return model.dense_output_2;
-    }
+printf("DEBUG: Forward pass completed\n");
+return model.dense_output_2;
+}
 
 //---------------------------------------------------------------------
 // Process a single spectrogram frame using the CNN
