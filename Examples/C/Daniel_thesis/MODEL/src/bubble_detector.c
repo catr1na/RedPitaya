@@ -315,39 +315,6 @@ static void conv2d_forward(
         }
     }
 }
-				
-        const float *weight_base = weights + f * weight_stride_filter;
-	float bias_val = bias[f];
-
-         for (int i = 0; i < out_h; i++) {
-            for (int j = 0; j < out_w; j++) {
-                float sum = bias_val;  // Start with bias
- 
-		//Pointer to input window
-		const float *input_window = input + i * input_stride_h + j * input_stride_w;
-		const float *weight_ptr = weight_base;
-
-		//Optimized kernel Convolution
-                for (int ki = 0; ki < kernel_size; ki++) {
-			const float *input_row = input_window + ki * input_stride_h;
-                        for (int kj = 0; kj < kernel_size; kj++) {
-                        	 const float *input_pixel = input_row + kj * input_stride_w;
-
-				// Vectorizable innner loop over channels
-				for (int c = 0; c < in_c; c++) {
-					sum += input_pixel[c] * weight_ptr[c];
-				}
-				weight_ptr += in_c;
-			}
-		}
-
-		//Apply ReLu and store
-		int out_idx = (i * out_w + j) * num_filters + f;
-		output[out_idx] = fmaxf(0.0f, sum);
-            }
-        }
-    }
-}
 
 //Optimized max pooling
 static void max_pool2d_forward
