@@ -350,7 +350,7 @@ static void conv2d_forward(
         }
     }
 }
-*/
+
 	
 //Optimized max pooling
 static void max_pool2d_forward(
