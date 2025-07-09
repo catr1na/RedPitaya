@@ -418,7 +418,7 @@ static float* forward_pass_with_timing(float* spectrogram, timing_results_t* tim
 
     // Layer 1: Conv2D + ReLU + MaxPool
     start = clock();
-    conv2d_forward_conv1(model.conv2d_output_1, spectrogram, h, w, c,
+    conv2d_forward_conv1(model.conv2d_output_1, spectrogram, h, w,
                    model.conv1_weights, model.conv1_bias,
                    CONV_KERNEL_SIZE, CONV1_FILTERS);
     timings->conv1_time = ((double)(clock() - start)) /  CLOCKS_PER_SEC;
