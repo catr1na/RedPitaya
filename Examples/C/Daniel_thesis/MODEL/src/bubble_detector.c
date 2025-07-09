@@ -266,7 +266,6 @@ flattened_size);
 //---------------------------------------------------------------------
 // CNN forward-pass helper functions
 //---------------------------------------------------------------------
-// Optimized conv2d_forward function: Much more efficient convolution - filter-major ordering
 static void conv2d_forward(
     float *output,
     const float *input,
@@ -279,42 +278,31 @@ static void conv2d_forward(
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
     
-    // Initialize output with bias
-    for (int f = 0; f < num_filters; f++) {
-        for (int i = 0; i < out_h; i++) {
-            for (int j = 0; j < out_w; j++) {
-                output[i * out_w * num_filters + j * num_filters + f] = bias[f];
-            }
-        }
-    }
-    
-    // Filter-major convolution for better cache performance
-    for (int f = 0; f < num_filters; f++) {
-        const float* filter_weights = weights + f * kernel_size * kernel_size * in_c;
-        
-        for (int ki = 0; ki < kernel_size; ki++) {
-            for (int kj = 0; kj < kernel_size; kj++) {
-                for (int c = 0; c < in_c; c++) {
-                    float weight = filter_weights[ki * kernel_size * in_c + kj * in_c + c];
-                    
-                    for (int i = 0; i < out_h; i++) {
-                        for (int j = 0; j < out_w; j++) {
+    // Simple, efficient convolution - one output pixel at a time
+    for (int i = 0; i < out_h; i++) {
+        for (int j = 0; j < out_w; j++) {
+            // Compute all filters for this output position
+            for (int f = 0; f < num_filters; f++) {
+                float sum = bias[f];
+                
+                // Convolve kernel with input patch
+                for (int ki = 0; ki < kernel_size; ki++) {
+                    for (int kj = 0; kj < kernel_size; kj++) {
+                        for (int c = 0; c < in_c; c++) {
                             int input_idx = (i + ki) * in_w * in_c + (j + kj) * in_c + c;
-                            int output_idx = i * out_w * num_filters + j * num_filters + f;
-                            output[output_idx] += input[input_idx] * weight;
+                            int weight_idx = f * kernel_size * kernel_size * in_c + 
+                                           ki * kernel_size * in_c + kj * in_c + c;
+                            sum += input[input_idx] * weights[weight_idx];
                         }
                     }
                 }
+                
+                // Apply ReLU and store
+                output[i * out_w * num_filters + j * num_filters + f] = fmaxf(0.0f, sum);
             }
         }
     }
-    
-    // Apply ReLU
-    for (int i = 0; i < out_h * out_w * num_filters; i++) {
-        output[i] = fmaxf(0.0f, output[i]);
-    }
 }
-
 
 //Optimized max pooling
 static void max_pool2d_forward(
