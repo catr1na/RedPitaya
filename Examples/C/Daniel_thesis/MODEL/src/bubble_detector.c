@@ -271,7 +271,7 @@ flattened_size);
 static void conv2d_forward(
     float *output,
     const float *input,
-    int in_h, int in_w, int in_c,
+    int in_h, int in_w,
     const float *weights,
     const float* bias,
     int kernel_size,
@@ -281,6 +281,27 @@ static void conv2d_forward(
     int out_w = in_w - kernel_size + 1;
     int kernel_area = kernel_size * kernel_size;
 
+    #pragma omp parallel for collapse(2)
+    for (int f = 0; f < num_filters; f++) {
+        for (int i = 0; i < out_h; i++) {
+            for (int j = 0; j < out_w; j++) {
+                float sum = bias[f];
+                const float *weight_base = weights + f * kernel_area;
+                for (int ki = 0; ki < kernel_size; ki++) {
+                    for (int kj = 0; kj < kernel_size; kj++) {
+                        int input_idx = (i + ki) * in_w + (j + kj);
+                        int weight_idx = ki * kernel_size + kj;
+                        sum += input[input_idx] * weight_base[weight_idx];
+                    }
+                }
+                int out_idx = (i * out_w + j) * num_filters + f;
+                output[out_idx] = sum > 0.0f ? sum : 0.0f;
+            }
+        }
+    }
+}
+
+/* THIS WAS IN THE CODE THAT RAN IN 1.3985 SECONDS
     // Precalculate strides for better cache performance
     int input_stride_h = in_w * in_c;
     int input_stride_w = in_c;
@@ -288,8 +309,8 @@ static void conv2d_forward(
     int weight_stride_h = kernel_size * in_c;
 
     // Parallelize over filters and output rows
-    #pragma omp parallel for collapse(2)
-    for (int f = 0; f < num_filters; f++) {
+   #pragma omp parallel for collapse(2)
+   for (int f = 0; f < num_filters; f++) {
         for (int i = 0; i < out_h; i++) {
             for (int j = 0; j < out_w; j++) {
                 float sum = bias[f];
@@ -317,7 +338,8 @@ static void conv2d_forward(
         }
     }
 }
-
+*/
+	
 //Optimized max pooling
 static void max_pool2d_forward(
     const float* input,
