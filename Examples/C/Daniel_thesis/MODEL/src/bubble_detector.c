@@ -277,51 +277,23 @@ static void conv2d_forward(
 ) {
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
-    
-    // Pre-compute indices to avoid repeated calculations
-    int in_w_c = in_w * in_c;
-    int out_w_filters = out_w * num_filters;
-    
-    // Initialize output with bias
+
     for (int i = 0; i < out_h; i++) {
         for (int j = 0; j < out_w; j++) {
-            int out_base = i * out_w_filters + j * num_filters;
             for (int f = 0; f < num_filters; f++) {
-                output[out_base + f] = bias[f];
-            }
-        }
-    }
-    
-    // Main convolution - optimized for ARM cache behavior
-    for (int ki = 0; ki < kernel_size; ki++) {
-        for (int kj = 0; kj < kernel_size; kj++) {
-            for (int c = 0; c < in_c; c++) {
-                // Pre-compute weight base index
-                int weight_base = (ki * kernel_size + kj) * in_c * num_filters + c * num_filters;
-                
-                for (int i = 0; i < out_h; i++) {
-                    for (int j = 0; j < out_w; j++) {
-                        // Pre-compute input index
-                        int input_idx = (i + ki) * in_w_c + (j + kj) * in_c + c;
-                        float input_val = input[input_idx];
-                        
-                        // Pre-compute output base
-                        int out_base = i * out_w_filters + j * num_filters;
-                        
-                        // Process all filters for this position
-                        for (int f = 0; f < num_filters; f++) {
-                            output[out_base + f] += input_val * weights[weight_base + f];
+                float sum = bias[f];
+                for (int ki = 0; ki < kernel_size; ki++) {
+                    for (int kj = 0; kj < kernel_size; kj++) {
+                        for (int c = 0; c < in_c; c++) {
+                            int input_idx = (i + ki) * in_w * in_c + (j + kj) * in_c + c;
+                            int weight_idx = (ki * kernel_size + kj) * in_c * num_filters + c * num_filters + f;
+                            sum += input[input_idx] * weights[weight_idx];
                         }
                     }
                 }
+                // ReLU
+                output[i * out_w * num_filters + j * num_filters + f] = sum > 0.0f ? sum : 0.0f;
             }
-        }
-    }
-    
-    // Apply ReLU - simple and fast
-    for (int i = 0; i < out_h * out_w * num_filters; i++) {
-        if (output[i] < 0.0f) {
-            output[i] = 0.0f;
         }
     }
 }
