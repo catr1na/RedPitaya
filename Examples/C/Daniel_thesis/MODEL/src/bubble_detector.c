@@ -301,7 +301,19 @@ static void conv2d_forward_conv1(
     }
 }
 
-/* THIS WAS IN THE CODE THAT RAN IN 1.3985 SECONDS
+// SOOOO THIS IS THE ORIGINAL CONV2D FORWARD FUNCTION
+static void conv2d_forward(
+    float *output,
+    const float *input,
+    int in_h, int in_w, int in_c,
+    const float *weights,
+    const float* bias,
+    int kernel_size,
+    int num_filters
+) {
+    int out_h = in_h - kernel_size + 1;
+    int out_w = in_w - kernel_size + 1;
+    int kernel_area = kernel_size * kernel_size;
     // Precalculate strides for better cache performance
     int input_stride_h = in_w * in_c;
     int input_stride_w = in_c;
@@ -406,7 +418,7 @@ static float* forward_pass_with_timing(float* spectrogram, timing_results_t* tim
 
     // Layer 1: Conv2D + ReLU + MaxPool
     start = clock();
-    conv2d_forward(model.conv2d_output_1, spectrogram, h, w, c,
+    conv2d_forward_conv1(model.conv2d_output_1, spectrogram, h, w, c,
                    model.conv1_weights, model.conv1_bias,
                    CONV_KERNEL_SIZE, CONV1_FILTERS);
     timings->conv1_time = ((double)(clock() - start)) /  CLOCKS_PER_SEC;
