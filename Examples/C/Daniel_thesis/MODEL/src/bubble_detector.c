@@ -267,8 +267,8 @@ flattened_size);
 // CNN forward-pass helper functions
 //---------------------------------------------------------------------
 static void conv2d_forward(
-    float *output,
-    const float *input,
+    float * restrict output,
+    const float * restrict input,
     int in_h, int in_w, int in_c,
     const float *weights,
     const float* bias,
@@ -288,11 +288,11 @@ static void conv2d_forward(
                 // Convolve kernel with input patch
                 for (int ki = 0; ki < kernel_size; ki++) {
                     for (int kj = 0; kj < kernel_size; kj++) {
-                        for (int c = 0; c < in_c; c++) {
-                            int input_idx = (i + ki) * in_w * in_c + (j + kj) * in_c + c;
-                            int weight_idx = f * kernel_size * kernel_size * in_c + 
-                                           ki * kernel_size * in_c + kj * in_c + c;
-                            sum += input[input_idx] * weights[weight_idx];
+                        for (int c = 0; c < in_c; c+=4) {
+                            sum += input[input_idx + c] * weights[weight_idx + c];
+   			    sum += input[input_idx + c + 1] * weights[weight_idx + c + 1];
+   			    sum += input[input_idx + c + 2] * weights[weight_idx + c + 2];
+  			    sum += input[input_idx + c + 3] * weights[weight_idx + c + 3];
                         }
                     }
                 }
