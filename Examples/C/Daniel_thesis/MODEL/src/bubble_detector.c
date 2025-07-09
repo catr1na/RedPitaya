@@ -270,43 +270,36 @@ flattened_size);
 static void conv2d_forward(
     float *output,
     const float *input,
-    int in_h, int in_w, int in_c,
-    const float *weights,
-    const float* bias,
-    int kernel_size,
-    int num_filters
-) {
+@@ -278,39 +279,44 @@ static void conv2d_forward(
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
     int kernel_area = kernel_size * kernel_size;
-    
-    // Precalculate strides for better cache performance
+
+//Precalculate strides for better cache performance
     int input_stride_h = in_w * in_c;
     int input_stride_w = in_c;
     int weight_stride_filter = kernel_area * in_c;
-    int output_stride_h = out_w * num_filters;
-    
-    // Use static scheduling for better load balancing
-    #pragma omp parallel for schedule(static) collapse(2)
-    for (int i = 0; i < out_h; i++) {
-        for (int j = 0; j < out_w; j++) {
-            const float *input_window = input + i * input_stride_h + j * input_stride_w;
-            float *output_pixel = output + i * output_stride_h + j * num_filters;
-            
-            // Process all filters for this output position
-            for (int f = 0; f < num_filters; f++) {
+    int weight_stride_h = kernel_size * in_c;
+
+    // Parallelize over filters and output rows
+    #pragma omp parallel for collapse(2)
+    for (int f = 0; f < num_filters; f++) {
+        for (int i = 0; i < out_h; i++) {
+            for (int j = 0; j < out_w; j++) {
+
                 float sum = bias[f];
                 const float *weight_base = weights + f * weight_stride_filter;
+                const float *input_window = input + i * input_stride_h + j * input_stride_w;
                 const float *weight_ptr = weight_base;
-                
-                // Optimized kernel convolution with better memory access pattern
+
+                // Unroll and vectorize the innermost loop
                 for (int ki = 0; ki < kernel_size; ki++) {
                     const float *input_row = input_window + ki * input_stride_h;
-                    
+
                     for (int kj = 0; kj < kernel_size; kj++) {
                         const float *input_pixel = input_row + kj * input_stride_w;
-                        
-                        // Vectorizable inner loop over channels
+
+                        // Encourage vectorization
                         #pragma omp simd reduction(+:sum)
                         for (int c = 0; c < in_c; c++) {
                             sum += input_pixel[c] * weight_ptr[c];
@@ -314,14 +307,12 @@ static void conv2d_forward(
                         weight_ptr += in_c;
                     }
                 }
-                
-                // Apply ReLU and store
-                output_pixel[f] = fmaxf(0.0f, sum);
+                int out_idx = (i * out_w + j) * num_filters + f;
+                output[out_idx] = fmaxf(0.0f, sum);
+
             }
         }
     }
-}
-
 //Optimized max pooling
 static void max_pool2d_forward
 	(const float* input,
