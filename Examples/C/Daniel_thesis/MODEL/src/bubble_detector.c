@@ -270,7 +270,6 @@ flattened_size);
 static void conv2d_forward(
     float *output,
     const float *input,
-@@ -278,39 +279,44 @@ static void conv2d_forward(
     int out_h = in_h - kernel_size + 1;
     int out_w = in_w - kernel_size + 1;
     int kernel_area = kernel_size * kernel_size;
