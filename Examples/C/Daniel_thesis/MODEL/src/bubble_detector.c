@@ -267,7 +267,7 @@ flattened_size);
 // CNN forward-pass helper functions
 //---------------------------------------------------------------------
 // Optimized 2D convolution for RedPitaya/ARM with OpenMP and SIMD
-
+//LAYER 1
 static void conv2d_forward_conv1(
     float *output,
     const float *input,
@@ -300,7 +300,49 @@ static void conv2d_forward_conv1(
         }
     }
 }
+//LAYER 2
+static void conv2d_forward_conv2(
+    float *output,
+    const float *input,
+    int in_h, int in_w,
+    const float *weights,
+    const float* bias,
+    int kernel_size,
+    int num_filters
+) {
+    int in_c = 64;
+    int out_h = in_h - kernel_size + 1;
+    int out_w = in_w - kernel_size + 1;
+    int kernel_area = kernel_size * kernel_size;
 
+    #pragma omp parallel for collapse(2)
+    for (int f = 0; f < num_filters; f++) {
+        for (int i = 0; i < out_h; i++) {
+            for (int j = 0; j < out_w; j++) {
+                float sum = bias[f];
+                const float *weight_base = weights + f * kernel_area * in_c;
+                for (int ki = 0; ki < kernel_size; ki++) {
+                    for (int kj = 0; kj < kernel_size; kj++) {
+                        int input_idx = (i + ki) * in_w * in_c + (j + kj) * in_c;
+                        int weight_idx = (ki * kernel_size + kj) * in_c;
+                        for (int c = 0; c < in_c; c += 8) {
+                            sum += input[input_idx + c + 0] * weight_base[weight_idx + c + 0];
+                            sum += input[input_idx + c + 1] * weight_base[weight_idx + c + 1];
+                            sum += input[input_idx + c + 2] * weight_base[weight_idx + c + 2];
+                            sum += input[input_idx + c + 3] * weight_base[weight_idx + c + 3];
+                            sum += input[input_idx + c + 4] * weight_base[weight_idx + c + 4];
+                            sum += input[input_idx + c + 5] * weight_base[weight_idx + c + 5];
+                            sum += input[input_idx + c + 6] * weight_base[weight_idx + c + 6];
+                            sum += input[input_idx + c + 7] * weight_base[weight_idx + c + 7];
+                        }
+                    }
+                }
+                int out_idx = (i * out_w + j) * num_filters + f;
+                output[out_idx] = sum > 0.0f ? sum : 0.0f;
+            }
+        }
+    }
+}
 // SOOOO THIS IS THE ORIGINAL CONV2D FORWARD FUNCTION
 static void conv2d_forward(
     float *output,
@@ -434,7 +476,7 @@ static float* forward_pass_with_timing(float* spectrogram, timing_results_t* tim
 
     // Layer 2: Conv2D + ReLU + MaxPool
     start = clock();
-    conv2d_forward(model.conv2d_output_2, model.pool_output_1, h, w, c,
+    conv2d_forward_conv2(model.conv2d_output_2, model.pool_output_1, h, w,
                    model.conv2_weights, model.conv2_bias,
                    CONV_KERNEL_SIZE, CONV2_FILTERS);
     timings->conv2_time = ((double)(clock() - start)) / CLOCKS_PER_SEC;
