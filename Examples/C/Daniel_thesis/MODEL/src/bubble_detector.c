@@ -268,7 +268,7 @@ flattened_size);
 //---------------------------------------------------------------------
 // Optimized 2D convolution for RedPitaya/ARM with OpenMP and SIMD
 
-static void conv2d_forward(
+static void conv2d_forward_conv1(
     float *output,
     const float *input,
     int in_h, int in_w,
