@@ -208,6 +208,7 @@ void* acquisition_thread(void* arg) {
 // This converts a spectrogram with shape [num_subwindows x orig_freq_bins]
 // (row-major order) into a new array with shape [new_freq_bins x num_subwindows]
 // using logarithmically spaced sampling along the frequency axis.
+//MONDAY: instead of this function, new scale with arbitrary frequency binnage? 
 static float* log_scale_spectrogram_c(const float* stft_power_db, int num_subwindows, int orig_freq_bins, int new_freq_bins) { //
     float* log_spec = (float*)malloc(new_freq_bins * num_subwindows * sizeof(float)); //
     if (!log_spec) {
