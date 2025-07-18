@@ -1,5 +1,36 @@
+"""
+Inference script for Bubble vs. Background Classification (using old, non‐log‐scaled .bin files).
+
+This script:
+  1) Reads each old‐style .bin file (metadata → raw time → STFT power array of shape (38,129)).
+  2) Applies a log‐frequency rebinning with integration to 10 bins → (10,38).
+  3) Normalizes each spectrogram by its own peak.
+  4) Adds a channel dimension so that the final input is (10,38,1).
+  5) Calls `model.predict()` on shape (1,10,38,1).
+  6) Can loop over a directory subset (all bubble files + 40% of the non‐bubble files),
+     compute precision/recall/FPR/accuracy/F1, and plot ROC/PR curves.
+"""
+
+import os
+import random
 import numpy as np
 import matplotlib.pyplot as plt
+from tensorflow.keras.models import load_model
+from sklearn.metrics import (
+    roc_curve,
+    auc,
+    precision_score,
+    recall_score,
+    confusion_matrix,
+    precision_recall_curve,
+    average_precision_score,
+    accuracy_score,
+    f1_score
+)
+
+###############################################################################
+# Log‐frequency rebinning with integration (NEW APPROACH)
+###############################################################################
 
 def create_log_binning_for_your_setup(orig_freq_bins=129, n_output_bins=10):
     """
@@ -81,9 +112,9 @@ def new_rebinning_function(spectrogram, n_output_bins=10):
     
     return new_spec
 
-def updated_preprocess_spectrogram(spectrogram, n_output_bins=10):
+def preprocess_spectrogram(spectrogram, n_output_bins=10):
     """
-    Updated version of preprocess_spectrogram function
+    Preprocess spectrogram for model input
     
     Input: spectrogram shape = (num_subwindows=38, fft_out_size=129)
     Steps:
@@ -91,12 +122,12 @@ def updated_preprocess_spectrogram(spectrogram, n_output_bins=10):
       (2) Log-bin with integration from 129 → 10 bins → (10, 38)
       (3) Divide by peak value → still (10, 38)
       (4) Expand dims → (10, 38, 1)
-    Returns: (10, 38, 1) instead of (513, 38, 1)
+    Returns: (10, 38, 1)
     """
     # (1) Transpose (38×129 → 129×38)
     spec_T = spectrogram.T  # shape = (129, 38)
     
-    # (2) Integration-based log binning instead of interpolation
+    # (2) Integration-based log binning
     spec_log = new_rebinning_function(spec_T, n_output_bins)  # shape = (10, 38)
     
     # (3) Normalize by the maximum of *this* spectrogram
@@ -107,7 +138,7 @@ def updated_preprocess_spectrogram(spectrogram, n_output_bins=10):
     # (4) Add channel dimension → (10, 38, 1)
     spec_final = spec_log[..., np.newaxis]
     
-    return spec_final  # This was missing in your original code!
+    return spec_final
 
 def visualize_binning_strategy(orig_freq_bins=129, n_output_bins=10):
     """
@@ -127,48 +158,136 @@ def visualize_binning_strategy(orig_freq_bins=129, n_output_bins=10):
     
     print(f"\nTotal input bins used: {total_bins_used} out of {orig_freq_bins-1} (excluding DC bin)")
     
-    # Create visualization
-    plt.figure(figsize=(12, 6))
-    
-    # Plot 1: Show the bin boundaries
-    plt.subplot(1, 2, 1)
-    x = np.arange(1, orig_freq_bins)  # Frequency bins 1-128
-    colors = plt.cm.tab10(np.linspace(0, 1, n_output_bins))
-    
-    for i, (start, end) in enumerate(bin_ranges):
-        mask = (x >= start) & (x <= end)
-        plt.bar(x[mask], np.ones(np.sum(mask)), color=colors[i], alpha=0.7, 
-                label=f'Bin {i+1}' if i < 5 else '')
-    
-    plt.xlabel('Original Frequency Bin Index')
-    plt.ylabel('Output Bin Assignment')
-    plt.title('Logarithmic Binning Strategy')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # Plot 2: Show bin widths
-    plt.subplot(1, 2, 2)
-    bin_widths = [end - start + 1 for start, end in bin_ranges]
-    plt.bar(range(1, n_output_bins + 1), bin_widths, color='skyblue', alpha=0.7)
-    plt.xlabel('Output Bin Number')
-    plt.ylabel('Width (number of input bins)')
-    plt.title('Bin Widths')
-    plt.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig('binning_strategy_visualization.png', dpi=300, bbox_inches='tight')
-    plt.show()
-    
     return bin_boundaries, bin_ranges
 
-# Test the functions
+###############################################################################
+# Load a single old‐style .bin file (non‐log‐scaled).
+###############################################################################
+def load_stft_file(filename: str) -> dict:
+    """
+    Reads a .bin file written by the OLD spectrogram acquisition C code.
+    File format:
+      - 7 uint32 metadata values:
+          meta[0] = SAMPLES_20MS
+          meta[1] = nperseg
+          meta[2] = noverlap
+          meta[3] = num_subwindows   (should be 38)
+          meta[4] = fft_out_size     (should be 129)
+          meta[5] = effective_sr
+          meta[6] = time_offset_ms
+      - SAMPLES_20MS float32 values: raw time‐domain data (unused here)
+      - (num_subwindows * fft_out_size) float32 values: STFT power array
+            in row‐major order, shape = (num_subwindows, fft_out_size) = (38, 129)
+
+    Returns:
+      {
+        'stft': 2D np.ndarray of shape (38, 129)
+      }
+    """
+    meta = np.fromfile(filename, dtype=np.uint32, count=7)
+    if meta.size < 7:
+        raise ValueError(f"File {filename} is too short to read metadata.")
+
+    samples_20ms   = int(meta[0])
+    nperseg        = int(meta[1])
+    noverlap       = int(meta[2])
+    num_subwindows = int(meta[3])  # expected 38
+    fft_out_size   = int(meta[4])  # expected 129
+
+    # Skip raw time‐domain data:
+    meta_bytes     = 7 * 4                 # 28 bytes
+    raw_time_bytes = samples_20ms * 4      # each float32 is 4 bytes
+    stft_offset    = meta_bytes + raw_time_bytes
+
+    stft_data = np.fromfile(
+        filename,
+        dtype=np.float32,
+        count=num_subwindows * fft_out_size,
+        offset=stft_offset
+    )
+    if stft_data.size < num_subwindows * fft_out_size:
+        raise ValueError(f"File {filename} seems too short for full STFT data.")
+
+    # Reshape into (num_subwindows, fft_out_size)
+    stft_data = stft_data.reshape((num_subwindows, fft_out_size))
+    return {'stft': stft_data}
+
+###############################################################################
+# Predict on one .bin file.
+###############################################################################
+def predict_on_bin(filename: str, model, threshold: float = 0.8):
+    """
+    1) Loads old‐style .bin → (38,129)
+    2) Preprocess → (10,38,1)
+    3) Batch dim → (1,10,38,1)
+    4) model.predict → [prob_bg, prob_bubble]
+    Prints and returns (predicted_class, [prob_bg, prob_bubble]).
+    """
+    data = load_stft_file(filename)
+    raw_spec = data['stft']                 # (38,129)
+    proc_spec = preprocess_spectrogram(raw_spec)  # (10,38,1)
+
+    # Batch dimension → (1,10,38,1)
+    input_data = np.expand_dims(proc_spec, axis=0)
+    pred_prob = model.predict(input_data, verbose=0)[0]  # shape = (2,)
+
+    print("Predicted probabilities [background, bubble]:", pred_prob)
+    predicted_class = 1 if (pred_prob[1] > threshold) else 0
+    print(f"Predicted class (threshold={threshold}): {predicted_class}")
+    return predicted_class, pred_prob
+
+###############################################################################
+# Predict across a directory subset to compute metrics & plot ROC/PR.
+###############################################################################
+def predict_on_directory(
+    directory: str,
+    model,
+    bubble_files: list,
+    threshold: float = 0.8,
+    sample_fraction: float = 0.4
+):
+    """
+    Loops over:
+      - all files in `bubble_files` ∩ (directory/*.bin), plus
+      - a random `sample_fraction` subset of the non‐bubble files.
+    Returns (y_true, y_scores, y_pred_labels), where:
+      y_true[i] ∈ {0,1}, y_scores[i] = model's P(bubble), y_pred_labels = thresholded.
+    """
+    bin_files = sorted([f for f in os.listdir(directory) if f.endswith('.bin')])
+    bubble_set = set(bubble_files)
+
+    bubble_in_dir    = [f for f in bin_files if f in bubble_set]
+    non_bubble_files = [f for f in bin_files if f not in bubble_set]
+
+    sample_size = int(len(non_bubble_files) * sample_fraction)
+    sampled_non_bubble = random.sample(non_bubble_files, sample_size) if sample_size > 0 else []
+
+    final_files = sorted(set(bubble_in_dir + sampled_non_bubble))
+
+    y_true   = []
+    y_scores = []
+
+    for fname in final_files:
+        full_path = os.path.join(directory, fname)
+        data = load_stft_file(full_path)
+        raw_spec = data['stft']                     # (38,129)
+        proc_spec = preprocess_spectrogram(raw_spec) # (10,38,1)
+
+        input_data = np.expand_dims(proc_spec, axis=0)    # (1,10,38,1)
+        prob_bubble = model.predict(input_data, verbose=0)[0, 1]
+        y_scores.append(prob_bubble)
+        y_true.append(1 if (fname in bubble_set) else 0)
+
+    y_true   = np.array(y_true, dtype=np.int32)
+    y_scores = np.array(y_scores, dtype=np.float32)
+    y_pred   = (y_scores > threshold).astype(np.int32)
+
+    return y_true, y_scores, y_pred
+
+###############################################################################
+# Main entry‐point.
+###############################################################################
 if __name__ == "__main__":
-    # IMPORTANT: You need to retrain your model with input_shape=(10,38,1) instead of (513,38,1)
-    # The current model expects (513,38,1) but the new binning outputs (10,38,1)
-    
-    # For now, this will fail until you retrain the model
-    # model = load_model('bubble_detector_modelNEW1.h5')
-    
     # Test the new binning strategy first
     print("=== Testing New Binning Strategy ===")
     visualize_binning_strategy(129, 10)
@@ -176,26 +295,192 @@ if __name__ == "__main__":
     # Test with dummy data to verify shapes
     print("\n=== Testing Data Pipeline ===")
     dummy_spectrogram = np.random.rand(38, 129)  # Your input format
-    processed = updated_preprocess_spectrogram(dummy_spectrogram, n_output_bins=10)
+    processed = preprocess_spectrogram(dummy_spectrogram, n_output_bins=10)
     print(f"Input shape: {dummy_spectrogram.shape}")
     print(f"Output shape: {processed.shape}")
     print(f"Output min/max: {processed.min():.4f} / {processed.max():.4f}")
     
-    # Once you retrain your model with input_shape=(10,38,1), uncomment below:
+    # IMPORTANT: You need to retrain your model with input_shape=(10,38,1) instead of (513,38,1)
+    # Once you retrain your model, uncomment the code below:
+    
     """
     # (1) Load the retrained model with input_shape=(10,38,1)
     model = load_model('bubble_detector_model_10bins.h5')  # New model name
-    
+
     # (2) Single‐file example
     single_bin = '/Users/Catrina/Desktop/CombinedTrainingData2/stft_436851.bin'
     print("=== Single File Prediction ===")
     predict_on_bin(single_bin, model, threshold=0.8)
-    
-    # (3) Continue with directory evaluation as before...
+
+    # (3) Evaluate on a directory subset
+    eval_dir = '/Users/Catrina/Desktop/CombinedTrainingData2/'
+    bubble_files = [
+        "stft_436851.bin",
+        "stft_472453.bin",
+        "stft_480039.bin",
+        "stft_489712.bin",
+        "stft_509922.bin",
+        "stft_539593.bin",
+        "stft_553732.bin",
+        "stft_553733.bin",
+        "stft_565593.bin",
+        "stft_581307.bin",
+        "stft_606454.bin",
+        "stft_636685.bin",
+        "stft_646469.bin",
+        "stft_671133.bin",
+        "stft_689650.bin",
+        "stft_698391.bin",
+        "stft_734491.bin",
+        "stft_734492.bin",
+        "stft_743329.bin",
+        "stft_776322.bin",
+        "stft_838205.bin",
+        "stft_850833.bin",
+        "stft_859606.bin",
+        "stft_869352.bin",
+        "stft_869353.bin",
+        "stft_879223.bin",
+        "stft_888666.bin",
+        "stft_888667.bin",
+        "stft_910538.bin",
+        "stft_910539.bin",
+        "stft_1044807.bin",
+        "stft_1044808.bin",
+        "stft_1072303.bin",
+        "stft_1086451.bin",
+        "stft_1109856.bin",
+        "stft_1109857.bin",
+        "stft_1216826.bin",
+        "stft_1216827.bin",
+        "stft_1242322.bin",
+        "stft_1259305.bin",
+        "stft_1259306.bin",
+        "stft_1272396.bin",
+        "stft_1272397.bin",
+        "stft_1289728.bin",
+        "stft_1289729.bin",
+        "stft_1313179.bin",
+        "stft_1313180.bin",
+        "stft_1348371.bin",
+        "stft_1377342.bin",
+        "stft_1377343.bin",
+        "stft_1422123.bin",
+        "stft_1422124.bin",
+        "stft_1435531.bin",
+        "stft_1435532.bin",
+        "stft_1463687.bin",
+        "stft_1463688.bin",
+        "stft_1496675.bin",
+        "stft_1517557.bin",
+        "stft_1517558.bin",
+        "stft_1525196.bin",
+        "stft_1540053.bin",
+        "stft_1548748.bin",
+        "stft_1564438.bin",
+        "stft_1590565.bin",
+        "stft_1601066.bin",
+        "stft_1601067.bin",
+        "stft_1613430.bin",
+        "stft_1613431.bin",
+        "stft_1621451.bin",
+        "stft_1621452.bin",
+        "stft_1706510.bin",
+        "stft_1706511.bin",
+        "stft_1727662.bin",
+        "stft_1742283.bin",
+        "stft_1742284.bin",
+        "stft_1763324.bin",
+        "stft_1804621.bin",
+        "stft_1804622.bin",
+        "stft_1828362.bin",
+        "stft_1828363.bin",
+        "stft_1839805.bin",
+        "stft_1839806.bin",
+        "stft_1855476.bin",
+        "stft_1855477.bin",
+        "stft_1877592.bin",
+        "stft_1877593.bin",
+        "stft_1890728.bin",
+        "stft_1890729.bin",
+        "stft_1941875.bin",
+        "stft_1941876.bin",
+        "stft_1963675.bin",
+        "stft_1971793.bin",
+        "stft_1971794.bin",
+        "stft_2026020.bin",
+        "stft_2035599.bin",
+        "stft_2050312.bin",
+        "stft_2050313.bin",
+        "stft_2080193.bin",
+        "stft_2091291.bin"
+    ]
+
+    print("\n=== Evaluating on Directory Subset for ROC & Metrics ===")
+    y_true, y_scores, y_pred = predict_on_directory(
+        eval_dir,
+        model,
+        bubble_files,
+        threshold=0.9997,
+        sample_fraction=0.4
+    )
+
+    # Compute metrics
+    precision = precision_score(y_true, y_pred)
+    recall    = recall_score(y_true, y_pred)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    false_positive_rate = fp / (fp + tn) if (fp + tn) > 0 else 0
+    accuracy = accuracy_score(y_true, y_pred)
+    f1       = f1_score(y_true, y_pred)
+
+    print(f"\nMetrics (threshold=0.9997):")
+    print(f"  Precision:           {precision:.4f}")
+    print(f"  Recall (Trigger Eff): {recall:.4f}")
+    print(f"  False Positive Rate: {false_positive_rate:.5f}")
+    print(f"  Accuracy:            {accuracy:.4f}")
+    print(f"  F1 Score:            {f1:.4f}")
+
+    # Plot ROC curve (log‐scale on x‐axis)
+    fpr, tpr, roc_thresholds = roc_curve(y_true, y_scores)
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure()
+    fpr_nonzero = np.clip(fpr, 1e-6, 1.0)
+    plt.plot(fpr_nonzero, tpr, label=f'ROC (AUC={roc_auc:.4f})')
+    plt.xscale('log')
+    plt.xlabel('False Positive Rate (log scale)')
+    plt.ylabel('Trigger Efficiency')
+    plt.title('Receiver Operating Characteristic')
+    diag = np.logspace(-6, 0, 1000)
+    plt.plot(diag, diag, 'k--', label='Random')
+    plt.ylim([0.0, 1.01])
+    plt.xlim([1e-6, 1.0])
+    plt.grid(True, which='both', ls='--')
+    plt.legend(loc='lower right')
+    plt.savefig('roc_curve_10bins.png')
+    plt.close()
+    print("Saved: roc_curve_10bins.png")
+
+    # Plot Precision‐Recall curve
+    precisions, recalls, pr_thresholds = precision_recall_curve(y_true, y_scores)
+    pr_auc = average_precision_score(y_true, y_scores)
+
+    plt.figure()
+    plt.plot(recalls, precisions, label=f'PR (AP={pr_auc:.3f})')
+    plt.xlabel('Recall (Trigger Eff)')
+    plt.ylabel('Precision')
+    plt.title('Precision‐Recall Curve')
+    plt.ylim([0.0, 1.05])
+    plt.xlim([0.0, 1.0])
+    plt.legend(loc='lower left')
+    plt.grid(True)
+    plt.savefig('precision_recall_curve_10bins.png')
+    plt.close()
+    print("Saved: precision_recall_curve_10bins.png")
     """
     
     print("\n=== Next Steps ===")
     print("1. Retrain your model with input_shape=(10, 38, 1)")
     print("2. Save the new model with a different name (e.g., 'bubble_detector_model_10bins.h5')")
-    print("3. Update the model loading line in this script")
+    print("3. Uncomment the prediction code above")
     print("4. Test the new model with the 10-bin preprocessing")
