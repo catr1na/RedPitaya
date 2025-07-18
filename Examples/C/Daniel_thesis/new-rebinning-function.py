@@ -296,7 +296,7 @@ if __name__ == "__main__":
     print("\n=== Testing Data Pipeline ===")
     dummy_spectrogram = np.random.rand(38, 129)  # Your input format
     processed = preprocess_spectrogram(dummy_spectrogram, n_output_bins=10)
-    print(f"Input shape: {dummy_spectrogram.shape}")
+    print(f"Input shape: {dummyhttps://github.com/catr1na/RedPitaya/tree/cnn-rebinning/Examples/C/Daniel_thesis_spectrogram.shape}")
     print(f"Output shape: {processed.shape}")
     print(f"Output min/max: {processed.min():.4f} / {processed.max():.4f}")
     
