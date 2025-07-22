@@ -3,10 +3,10 @@
  * 
  * This script:
  *   1) Reads each old-style .bin file (metadata → raw time → STFT power array of shape (38,129)).
- *   2) Applies a log-frequency rebinning with integration to 10 bins → (10,38).
+ *   2) Applies a log-frequency rebinning with integration to 16 bins → (16,38).
  *   3) Normalizes each spectrogram by its own peak.
- *   4) Adds a channel dimension so that the final input is (10,38,1).
- *   5) Calls model prediction on shape (1,10,38,1).
+ *   4) Adds a channel dimension so that the final input is (16,38,1).
+ *   5) Calls model prediction on shape (1,16,38,1).
  *   6) Can loop over a directory subset (all bubble files + 40% of the non-bubble files),
  *      compute precision/recall/FPR/accuracy/F1, and plot ROC/PR curves.
  */
@@ -23,7 +23,7 @@
 #define MAX_FILENAME 512
 #define MAX_FILES 10000
 #define ORIG_FREQ_BINS 129
-#define N_OUTPUT_BINS 10
+#define N_OUTPUT_BINS 16
 #define NUM_TIME_STEPS 38
 #define EXPECTED_SUBWINDOWS 38
 #define EXPECTED_FFT_SIZE 129
@@ -66,7 +66,7 @@ void create_log_binning_for_setup(int orig_freq_bins, int n_output_bins,
     /*
      * Create logarithmic binning strategy for specific setup:
      * - Original: 129 frequency bins from FFT
-     * - Target: 10 logarithmic bins
+     * - Target: 16 logarithmic bins
      */
     
     // Skip DC bin (index 0), work with bins 1 to 128
@@ -122,7 +122,7 @@ void new_rebinning_function(float spectrogram[ORIG_FREQ_BINS][NUM_TIME_STEPS],
     /*
      * Integration-based logarithmic binning
      * Input: spectrogram shape = (orig_freq_bins=129, num_time_steps=38)
-     * Output: shape = (n_output_bins=10, num_time_steps=38)
+     * Output: shape = (n_output_bins=16, num_time_steps=38)
      */
     
     bin_range_t bin_ranges[N_OUTPUT_BINS];
@@ -156,10 +156,10 @@ void preprocess_spectrogram(float input_spec[EXPECTED_SUBWINDOWS][EXPECTED_FFT_S
      * Input: spectrogram shape = (num_subwindows=38, fft_out_size=129)
      * Steps:
      *   (1) Transpose → (129, 38)
-     *   (2) Log-bin with integration from 129 → 10 bins → (10, 38)
-     *   (3) Divide by peak value → still (10, 38)
+     *   (2) Log-bin with integration from 129 → 16 bins → (16, 38)
+     *   (3) Divide by peak value → still (16, 38)
      *   (4) Channel dimension handled separately
-     * Returns: (10, 38)
+     * Returns: (16, 38)
      */
     
     // (1) Transpose (38×129 → 129×38)
@@ -197,7 +197,7 @@ void preprocess_spectrogram(float input_spec[EXPECTED_SUBWINDOWS][EXPECTED_FFT_S
 
 void visualize_binning_strategy(int orig_freq_bins, int n_output_bins) {
     /*
-     * Show how the 129 original bins map to 10 logarithmic bins
+     * Show how the 129 original bins map to 16 logarithmic bins
      */
     
     bin_range_t bin_ranges[n_output_bins];
@@ -333,7 +333,7 @@ void mock_model_predict(float input[N_OUTPUT_BINS][NUM_TIME_STEPS], float *prob_
 int predict_on_bin(const char *filename, float threshold, int *predicted_class, float prob[2]) {
     /*
      * 1) Loads old-style .bin → (38,129)
-     * 2) Preprocess → (10,38)
+     * 2) Preprocess → (16,38)
      * 3) Mock model prediction → [prob_bg, prob_bubble]
      * Prints and returns (predicted_class, [prob_bg, prob_bubble]).
      */
