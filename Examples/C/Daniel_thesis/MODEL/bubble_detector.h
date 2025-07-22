@@ -6,7 +6,7 @@
 
 // CNN Architecture Parameters
 // used to be CONV1_FILTERS: 64, CONV2_FILTERS: 128, CONV3_FILTERS & DENSE1_UNITS: 256
-#define CONV1_FILTERS 16
+#define CONV1_FILTERS 32
 #define CONV2_FILTERS 32
 #define CONV3_FILTERS 64
 #define DENSE1_UNITS 64
