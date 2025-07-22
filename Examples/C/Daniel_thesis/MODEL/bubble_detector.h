@@ -13,7 +13,7 @@
 #define POOL_SIZE 2
 
 // Input dimensions
-#define INPUT_HEIGHT 513  // Number of frequency bins (nperseg=1024)
+#define INPUT_HEIGHT 17  // Number of frequency bins (nperseg=1024)
 #define INPUT_WIDTH 38    // Number of subwindows per chunk (num_subwindows=38)
 
 // Detection Results
