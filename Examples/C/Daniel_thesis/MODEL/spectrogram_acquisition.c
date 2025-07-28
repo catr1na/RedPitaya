@@ -71,6 +71,10 @@ static STFT_Handle* stft_handle = NULL;
 static int nperseg = 256; // Sub-window size => expecting 38 sub-windows per chunk
 static int noverlap = 0;  // No overlap => hop=256
 
+//function prototype
+void save_spectrogram_csv(float* log_power_array, int new_freq_bins, int num_subwindows, uint32_t frame_num);
+
+
 // Global flag for trigger-saving logic in process_buffer
 bool trigger_mode_enabled = false;
 
@@ -382,6 +386,7 @@ static float* log_scale_spectrogram_c(const float* stft_power_db, int num_subwin
 // Then compute STFT. If saving, write to .bin. Otherwise pass to CNN (mode 0).
 //
 //---------------------------------------------------------------------
+
 void process_buffer(int index) { //
     float* time_data = cbuf.buffers[index].data; //
 
