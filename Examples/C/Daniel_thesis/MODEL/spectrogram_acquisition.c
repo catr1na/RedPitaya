@@ -387,6 +387,28 @@ static float* log_scale_spectrogram_c(const float* stft_power_db, int num_subwin
 //
 //---------------------------------------------------------------------
 
+void save_spectrogram_csv(float* log_power_array, int new_freq_bins, int num_subwindows, uint32_t frame_num) {
+    char filename[256];
+    snprintf(filename, sizeof(filename), "%s/spec_%06u.csv", output_directory, frame_num);
+    
+    FILE* fp = fopen(filename, "w");
+    if (!fp) {
+        fprintf(stderr, "Failed to open CSV file %s\n", filename);
+        return;
+    }
+    
+    // Write log-scaled spectrogram (513 x 38)
+    for (int freq = 0; freq < new_freq_bins; freq++) {
+        for (int time = 0; time < num_subwindows; time++) {
+            fprintf(fp, "%.6f", log_power_array[freq * num_subwindows + time]);
+            if (time < num_subwindows - 1) fprintf(fp, ",");
+        }
+        fprintf(fp, "\n");
+    }
+    fclose(fp);
+    printf("Saved CSV spectrogram %u => %s\n", frame_num, filename);
+}
+
 void process_buffer(int index) { //
     float* time_data = cbuf.buffers[index].data; //
 
@@ -447,6 +469,8 @@ void process_buffer(int index) { //
             log_power_array[i] *= inv; //
         }
     }
+
+    
 
     // 3) If in saving mode, update metadata and write the log-scaled spectrogram.
     if (cbuf.save_to_file) { //
@@ -509,28 +533,6 @@ void process_buffer(int index) { //
 }
 
 // Add this function to save spectrograms as CSV for easier Python loading
-void save_spectrogram_csv(float* log_power_array, int new_freq_bins, int num_subwindows, uint32_t frame_num) {
-    char filename[256];
-    snprintf(filename, sizeof(filename), "%s/spec_%06u.csv", output_directory, frame_num);
-    
-    FILE* fp = fopen(filename, "w");
-    if (!fp) {
-        fprintf(stderr, "Failed to open CSV file %s\n", filename);
-        return;
-    }
-    
-    // Write log-scaled spectrogram (513 x 38)
-    for (int freq = 0; freq < new_freq_bins; freq++) {
-        for (int time = 0; time < num_subwindows; time++) {
-            fprintf(fp, "%.6f", log_power_array[freq * num_subwindows + time]);
-            if (time < num_subwindows - 1) fprintf(fp, ",");
-        }
-        fprintf(fp, "\n");
-    }
-    fclose(fp);
-    printf("Saved CSV spectrogram %u => %s\n", frame_num, filename);
-}
-
 //
 // Processing thread: waits for new data in the ring buffer, processes it
 //
