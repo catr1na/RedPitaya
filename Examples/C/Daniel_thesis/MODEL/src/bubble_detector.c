@@ -148,7 +148,7 @@ bool detector_init(const char* weights_dir) {
         fprintf(stderr, "Detector is already initialized.\n");
         return false;
     }
-    FILE* f = fopen(weights_path, "rb");
+    FILE* f = fopen("weights_for_c.bin", "rb");
     if (!f) {
 	perror("Failed to open weights file");
 	return false;
@@ -178,6 +178,8 @@ bool detector_init(const char* weights_dir) {
         sizes[i] = size;
     }
     fclose(f);
+	
+
 
 
     // Load Conv1 weights and bias
