@@ -19,6 +19,8 @@
 #include "stft_dsp.h"          // STFT code
 #include "bubble_detector.h"   // CNN (if enabled)
 
+void save_spectrogram_csv(float* log_power_array, int new_freq_bins, int num_subwindows, uint32_t frame_num);
+
 // Red Pitaya sample rate and decimation
 #define SAMPLE_RATE      125000000
 #define DECIMATION       RP_DEC_256
@@ -72,7 +74,6 @@ static int nperseg = 256; // Sub-window size => expecting 38 sub-windows per chu
 static int noverlap = 0;  // No overlap => hop=256
 
 //function prototype
-void save_spectrogram_csv(float* log_power_array, int new_freq_bins, int num_subwindows, uint32_t frame_num);
 
 
 // Global flag for trigger-saving logic in process_buffer
