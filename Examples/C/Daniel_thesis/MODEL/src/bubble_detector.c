@@ -148,6 +148,37 @@ bool detector_init(const char* weights_dir) {
         fprintf(stderr, "Detector is already initialized.\n");
         return false;
     }
+    FILE* f = fopen(weights_path, "rb");
+    if (!f) {
+	perror("Failed to open weights file");
+	return false;
+    }
+    uint32_t num_layers;
+    fread(&num_layers, sizeof(uint32_t), 1, f);
+
+    float** layers = malloc(num_layers * sizeof(float*));
+    int* sizes = malloc(num_layers * sizeof(int));
+    if (!layers || !sizes) {
+        fprintf(stderr, "Memory allocation failed for weight metadata\n");
+        fclose(f);
+        return false;
+    }
+    for (int i = 0; i < num_layers; i++) {
+        uint32_t ndim;
+        fread(&ndim, sizeof(uint32_t), 1, f);
+        uint32_t shape[ndim];
+        int size = 1;
+        for (int d = 0; d < ndim; d++) {
+            fread(&shape[d], sizeof(uint32_t), 1, f);
+            size *= shape[d];
+        }
+        float* data = malloc(size * sizeof(float));
+        fread(data, sizeof(float), size, f);
+        layers[i] = data;
+        sizes[i] = size;
+    }
+    fclose(f);
+
 
     // Load Conv1 weights and bias
     char* filepath = build_filepath(weights_dir, "conv1_weights.bin");
@@ -263,6 +294,53 @@ flattened_size);
     return true;
 }
 
+    // Assign layers to CNNModel in the correct order
+    int idx = 0;
+    model.conv1_weights = layers[idx++];
+    model.conv1_bias    = layers[idx++];
+    model.conv2_weights = layers[idx++];
+    model.conv2_bias    = layers[idx++];
+    model.conv3_weights = layers[idx++];
+    model.conv3_bias    = layers[idx++];
+    model.dense1_weights = layers[idx++];
+    model.dense1_bias    = layers[idx++];
+    model.dense2_weights = layers[idx++];
+    model.dense2_bias    = layers[idx++];
+
+    // Compute buffer sizes based on dimensions
+    int h1 = INPUT_HEIGHT - CONV_KERNEL_SIZE + 1;
+    int w1 = INPUT_WIDTH - CONV_KERNEL_SIZE + 1;
+    int ph1 = h1 / POOL_SIZE;
+    int pw1 = w1 / POOL_SIZE;
+
+    int h2 = ph1 - CONV_KERNEL_SIZE + 1;
+    int w2 = pw1 - CONV_KERNEL_SIZE + 1;
+    int ph2 = h2 / POOL_SIZE;
+    int pw2 = w2 / POOL_SIZE;
+
+    int h3 = ph2 - CONV_KERNEL_SIZE + 1;
+    int w3 = pw2 - CONV_KERNEL_SIZE + 1;
+    int ph3 = h3 / POOL_SIZE;
+    int pw3 = w3 / POOL_SIZE;
+
+    int c1 = CONV1_FILTERS;
+    int c2 = CONV2_FILTERS;
+    int c3 = CONV3_FILTERS;
+
+    model.conv2d_output_1 = malloc(sizeof(float) * h1 * w1 * c1);
+    model.pool_output_1   = malloc(sizeof(float) * ph1 * pw1 * c1);
+    model.conv2d_output_2 = malloc(sizeof(float) * h2 * w2 * c2);
+    model.pool_output_2   = malloc(sizeof(float) * ph2 * pw2 * c2);
+    model.conv2d_output_3 = malloc(sizeof(float) * h3 * w3 * c3);
+    model.pool_output_3   = malloc(sizeof(float) * ph3 * pw3 * c3);
+    model.dense_output_1  = malloc(sizeof(float) * DENSE1_UNITS);
+    model.dense_output_2  = malloc(sizeof(float) * 2);
+
+    is_initialized = 1;
+    free(layers);
+    free(sizes);
+    return true;
+}
 //---------------------------------------------------------------------
 // CNN forward-pass helper functions
 //---------------------------------------------------------------------
