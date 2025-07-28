@@ -569,7 +569,7 @@ int main(int argc, char** argv) { //
         // Mode 0: CNN detection, free-running
         cbuf.save_to_file     = false; //
         trigger_mode_enabled  = false; //
-        if (!detector_init(output_directory)) { //
+        if (!detector_init("weights_for_c.bin")) { //
             fprintf(stderr, "detector_init failed!\n"); //
             return 1; //
         }
