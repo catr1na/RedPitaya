@@ -19,7 +19,6 @@
 #include "stft_dsp.h"          // STFT code
 #include "bubble_detector.h"   // CNN (if enabled)
 
-void save_spectrogram_csv(float* log_power_array, int new_freq_bins, int num_subwindows, uint32_t frame_num);
 
 // Red Pitaya sample rate and decimation
 #define SAMPLE_RATE      125000000
