@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+void save_spectrogram_csv(float* log_power_array, int new_freq_bins, int num_subwindows, uint32_t frame_num);
+
 // CNN Architecture Parameters
 // used to be CONV1_FILTERS: 64, CONV2_FILTERS: 128, CONV3_FILTERS & DENSE1_UNITS: 256
 #define CONV1_FILTERS 32
