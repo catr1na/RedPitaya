@@ -7,7 +7,7 @@
 
 1.  Ssh into the RP
    
-        a. ssh root@RED_PITAYA_IP
+        ssh root@RED_PITAYA_IP
     
 2.  Make the output directory for the spectrograms to save into
 
